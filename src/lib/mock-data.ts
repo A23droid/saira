@@ -1,4 +1,17 @@
-import { Paper, Project, Note, ChatMessage, User } from "./types";
+import {
+  Paper,
+  Project,
+  Note,
+  ChatMessage,
+  User,
+  Collection,
+  HistoryEvent,
+  TrendingEntry,
+  AnalyticsSnapshot,
+  SavedArtifact,
+  RelatedPaperLink,
+  Badge,
+} from "./types";
 
 export const currentUser: User = {
   name: "Meera Anand",
@@ -437,3 +450,239 @@ export function getNotesForPaper(paperId: string) {
 export function similarPapers(paperId: string, count = 3) {
   return papers.filter((p) => p.id !== paperId).slice(0, count);
 }
+
+/* ---------- v2 mock data ---------- */
+
+export const collections: Collection[] = [
+  {
+    id: "col1",
+    name: "Favorites",
+    description: "Papers you've starred for quick access.",
+    icon: "star",
+    color: "brass",
+    paperIds: ["p1", "p6"],
+    smart: false,
+    createdAt: "2026-05-12",
+    updatedAt: "2026-07-16",
+  },
+  {
+    id: "col2",
+    name: "Read this week",
+    description: "Auto-curated from your reading activity over the last 7 days.",
+    icon: "clock",
+    color: "teal",
+    paperIds: ["p2", "p4"],
+    smart: true,
+    createdAt: "2026-07-14",
+    updatedAt: "2026-07-20",
+  },
+  {
+    id: "col3",
+    name: "Foundational transformers",
+    description: "The core architecture papers everything else in the field builds on.",
+    icon: "layers",
+    color: "ink",
+    paperIds: ["p1", "p2", "p8"],
+    smart: false,
+    createdAt: "2026-06-01",
+    updatedAt: "2026-07-10",
+  },
+  {
+    id: "col4",
+    name: "Trending in my field",
+    description: "Auto-curated from citation velocity in NLP and generative modeling.",
+    icon: "flame",
+    color: "brass",
+    paperIds: ["p3", "p5", "p7"],
+    smart: true,
+    createdAt: "2026-07-18",
+    updatedAt: "2026-07-20",
+  },
+];
+
+export function getCollectionById(id: string) {
+  return collections.find((c) => c.id === id);
+}
+
+export function getPapersForCollection(collectionId: string) {
+  const collection = getCollectionById(collectionId);
+  if (!collection) return [];
+  return papers.filter((p) => collection.paperIds.includes(p.id));
+}
+
+export const historyEvents: HistoryEvent[] = [
+  {
+    id: "h1",
+    type: "search",
+    title: "Searched “retrieval-augmented generation”",
+    timestamp: "2026-07-20T09:05:00",
+    href: "/search",
+  },
+  {
+    id: "h2",
+    type: "view_paper",
+    title: "Opened LoRA: Low-Rank Adaptation of Large Language Models",
+    timestamp: "2026-07-20T09:12:00",
+    href: "/papers/p4",
+  },
+  {
+    id: "h3",
+    type: "chat",
+    title: "Asked SAIRA about memory footprint in Efficient Fine-Tuning Methods",
+    detail: "“How does LoRA compare to full fine-tuning in terms of memory footprint?”",
+    timestamp: "2026-07-19T14:30:00",
+    href: "/projects/proj1?tab=chat",
+  },
+  {
+    id: "h4",
+    type: "note_added",
+    title: "Added a note to Attention Is All You Need",
+    timestamp: "2026-07-18T11:02:00",
+    href: "/papers/p1",
+  },
+  {
+    id: "h5",
+    type: "compare",
+    title: "Compared 3 papers in Efficient Fine-Tuning Methods",
+    timestamp: "2026-07-17T16:45:00",
+    href: "/projects/proj1?tab=compare",
+  },
+  {
+    id: "h6",
+    type: "view_project",
+    title: "Opened Retrieval & Generative Grounding",
+    timestamp: "2026-07-16T10:15:00",
+    href: "/projects/proj2",
+  },
+  {
+    id: "h7",
+    type: "review_generated",
+    title: "Generated a literature review draft",
+    detail: "Efficient Fine-Tuning Methods",
+    timestamp: "2026-07-15T09:40:00",
+    href: "/projects/proj1?tab=review",
+  },
+  {
+    id: "h8",
+    type: "search",
+    title: "Searched “chain-of-thought reasoning”",
+    timestamp: "2026-07-14T08:20:00",
+    href: "/search",
+  },
+  {
+    id: "h9",
+    type: "view_paper",
+    title: "Opened Denoising Diffusion Probabilistic Models",
+    timestamp: "2026-07-12T19:05:00",
+    href: "/papers/p6",
+  },
+];
+
+export const trendingEntries: TrendingEntry[] = [
+  { paperId: "p5", weeklyCitationDelta: 412, trendScore: 96, reason: "Cited in 6 new survey papers this week" },
+  { paperId: "p4", weeklyCitationDelta: 305, trendScore: 91, reason: "Rising fast alongside efficient fine-tuning discourse" },
+  { paperId: "p3", weeklyCitationDelta: 218, trendScore: 84, reason: "Referenced heavily in new RAG tooling releases" },
+  { paperId: "p6", weeklyCitationDelta: 176, trendScore: 78, reason: "Renewed interest from diffusion-based video work" },
+  { paperId: "p7", weeklyCitationDelta: 140, trendScore: 70, reason: "Popular as a starting point for new LLM readers" },
+];
+
+export function getTrendingPapers() {
+  return trendingEntries
+    .map((entry) => ({ entry, paper: getPaperById(entry.paperId) }))
+    .filter((row): row is { entry: TrendingEntry; paper: Paper } => !!row.paper)
+    .sort((a, b) => b.entry.trendScore - a.entry.trendScore);
+}
+
+export const analyticsSnapshot: AnalyticsSnapshot = {
+  papersReadByMonth: [
+    { month: "Feb", count: 4 },
+    { month: "Mar", count: 7 },
+    { month: "Apr", count: 5 },
+    { month: "May", count: 9 },
+    { month: "Jun", count: 12 },
+    { month: "Jul", count: 8 },
+  ],
+  topicBreakdown: [
+    { tag: "llm", count: 9 },
+    { tag: "nlp", count: 7 },
+    { tag: "fine-tuning", count: 4 },
+    { tag: "vision", count: 3 },
+    { tag: "reasoning", count: 2 },
+  ],
+  totalPapersSaved: papers.filter((p) => p.savedToProjectIds.length > 0).length,
+  totalNotes: 12,
+  totalReviews: 3,
+  totalChatQuestions: 28,
+  currentStreakDays: 6,
+  weeklyGoal: { target: 5, completed: 3 },
+};
+
+export const savedArtifacts: SavedArtifact[] = [
+  {
+    id: "a1",
+    projectId: "proj1",
+    type: "chat_answer",
+    title: "LoRA vs. full fine-tuning — memory footprint",
+    content:
+      "LoRA freezes the pretrained weights and only trains small low-rank update matrices, cutting trainable parameters by roughly four orders of magnitude compared to full fine-tuning, with no extra inference latency.",
+    citedPaperIds: ["p4"],
+    createdAt: "2026-07-15",
+  },
+  {
+    id: "a2",
+    projectId: "proj1",
+    paperId: "p1",
+    type: "review_snippet",
+    title: "Intro paragraph — self-attention motivation",
+    content:
+      "Recurrent models process sequences step by step, which limits parallelization during training. Self-attention removes this constraint by connecting any two positions in a sequence directly.",
+    citedPaperIds: ["p1"],
+    createdAt: "2026-07-11",
+  },
+  {
+    id: "a3",
+    projectId: "proj2",
+    type: "chat_answer",
+    title: "RAG vs. diffusion — grounding mechanism",
+    content:
+      "RAG grounds generation in retrieved text passages, while diffusion models ground image generation in a learned denoising process — the two are not directly comparable, but both trade a fixed parametric model for an external or iterative mechanism.",
+    citedPaperIds: ["p3", "p6"],
+    createdAt: "2026-07-18",
+  },
+];
+
+export function getSavedArtifactsForProject(projectId: string) {
+  return savedArtifacts.filter((a) => a.projectId === projectId);
+}
+
+export function getSavedArtifactsForPaper(paperId: string) {
+  return savedArtifacts.filter((a) => a.paperId === paperId);
+}
+
+export const relatedPaperLinks: Record<string, RelatedPaperLink[]> = {
+  p1: [
+    { paperId: "p2", relation: "supports", note: "Builds directly on the self-attention mechanism introduced here." },
+    { paperId: "p8", relation: "contradicts", note: "Argues convolutional inductive bias still matters for some tasks." },
+  ],
+  p4: [
+    { paperId: "p1", relation: "supports", note: "Assumes a Transformer backbone as the base architecture." },
+    { paperId: "p5", relation: "supports", note: "Both favor lightweight, inference-time or update-time efficiency." },
+  ],
+  p3: [
+    { paperId: "p7", relation: "supports", note: "Cited as a key retrieval-augmented approach in the survey." },
+  ],
+};
+
+export function getRelatedLinksForPaper(paperId: string) {
+  const links = relatedPaperLinks[paperId] || [];
+  return links
+    .map((link) => ({ link, paper: getPaperById(link.paperId) }))
+    .filter((row): row is { link: RelatedPaperLink; paper: Paper } => !!row.paper);
+}
+
+export const badges: Badge[] = [
+  { label: "Early adopter", description: "Joined SAIRA in its first month." },
+  { label: "6-day streak", description: "Read or reviewed papers 6 days in a row." },
+  { label: "First review drafted", description: "Generated a literature review with SAIRA." },
+  { label: "50 papers saved", description: "Saved 50 papers across all projects." },
+];

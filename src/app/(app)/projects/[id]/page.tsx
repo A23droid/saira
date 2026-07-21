@@ -9,6 +9,8 @@ import {
   Users,
   Plus,
   Calendar,
+  Share2,
+  Waypoints,
 } from "lucide-react";
 import { PageHeader } from "@/components/shared/page-header";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
@@ -23,7 +25,15 @@ import { EmptyState } from "@/components/shared/empty-state";
 import { AIChatPanel } from "@/components/shared/ai-chat-panel";
 import { ComparePanel } from "@/components/shared/compare-panel";
 import { LiteratureReviewPanel } from "@/components/shared/literature-review-panel";
-import { getProjectById, getPapersForProject, chatMessages, notes as allNotes } from "@/lib/mock-data";
+import { GraphPlaceholder } from "@/components/shared/graph-placeholder";
+import { SavedArtifactsPanel } from "@/components/shared/saved-artifacts-panel";
+import {
+  getProjectById,
+  getPapersForProject,
+  chatMessages,
+  notes as allNotes,
+  getSavedArtifactsForProject,
+} from "@/lib/mock-data";
 import { notFound } from "next/navigation";
 
 export default function ProjectDetailsPage({ params }: { params: Promise<{ id: string }> }) {
@@ -39,6 +49,7 @@ export default function ProjectDetailsPage({ params }: { params: Promise<{ id: s
   const projectPapers = getPapersForProject(project.id);
   const projectNotes = allNotes.filter((n) => projectPapers.some((p) => p.id === n.paperId));
   const selectedPapers = projectPapers.filter((p) => compareSelection.includes(p.id));
+  const projectArtifacts = getSavedArtifactsForProject(project.id);
 
   const milestones = [
     { label: "Papers added", done: project.milestones.papersAdded },
@@ -72,6 +83,7 @@ export default function ProjectDetailsPage({ params }: { params: Promise<{ id: s
           <TabsTrigger value="chat">Chat</TabsTrigger>
           <TabsTrigger value="compare">Compare</TabsTrigger>
           <TabsTrigger value="review">Literature review</TabsTrigger>
+          <TabsTrigger value="artifacts">Saved artifacts</TabsTrigger>
         </TabsList>
 
         <TabsContent value="overview">
@@ -124,6 +136,20 @@ export default function ProjectDetailsPage({ params }: { params: Promise<{ id: s
               <p className="font-display text-3xl text-ink">{projectNotes.length}</p>
               <p className="mt-1 text-sm text-ink-soft">notes across saved papers</p>
             </Card>
+          </div>
+
+          <div className="mt-5 grid gap-5 sm:grid-cols-2">
+            <GraphPlaceholder
+              icon={Share2}
+              title="Citation graph"
+              description="A map of how the papers in this project cite and are cited by one another."
+            />
+            <GraphPlaceholder
+              icon={Waypoints}
+              title="Concept graph"
+              description="Shared concepts and methods across this project's papers, clustered visually."
+              accent="brass"
+            />
           </div>
         </TabsContent>
 
@@ -202,6 +228,13 @@ export default function ProjectDetailsPage({ params }: { params: Promise<{ id: s
 
         <TabsContent value="review">
           <LiteratureReviewPanel papers={projectPapers} topic={project.name.toLowerCase()} />
+        </TabsContent>
+
+        <TabsContent value="artifacts">
+          <p className="mb-4 text-sm text-ink-soft">
+            Answers and snippets you've pinned from Ask AI and the literature review draft.
+          </p>
+          <SavedArtifactsPanel artifacts={projectArtifacts} />
         </TabsContent>
       </Tabs>
     </div>

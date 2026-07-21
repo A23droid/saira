@@ -3,7 +3,21 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useState } from "react";
-import { Menu, X, LayoutDashboard, Search, FolderKanban, GitCompareArrows, BookMarked, Settings } from "lucide-react";
+import {
+  Menu,
+  X,
+  LayoutDashboard,
+  Search,
+  FolderKanban,
+  GitCompareArrows,
+  BookMarked,
+  Settings,
+  Layers,
+  Flame,
+  History,
+  BarChart3,
+  UserCircle,
+} from "lucide-react";
 import { Logo } from "@/components/shared/logo";
 import { cn } from "@/lib/utils";
 
@@ -13,6 +27,11 @@ const navItems = [
   { href: "/projects", label: "Projects", icon: FolderKanban },
   { href: "/compare", label: "Compare", icon: GitCompareArrows },
   { href: "/review", label: "Literature review", icon: BookMarked },
+  { href: "/collections", label: "Collections", icon: Layers },
+  { href: "/trending", label: "Trending", icon: Flame },
+  { href: "/history", label: "History", icon: History },
+  { href: "/analytics", label: "Analytics", icon: BarChart3 },
+  { href: "/profile", label: "Profile", icon: UserCircle },
   { href: "/settings", label: "Settings", icon: Settings },
 ];
 

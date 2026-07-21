@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { motion } from "framer-motion";
-import { BookmarkPlus, Quote, FileCheck2 } from "lucide-react";
+import { BookmarkPlus, Quote, FileCheck2, Flame } from "lucide-react";
 import { Paper } from "@/lib/types";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -19,11 +19,14 @@ export function PaperCard({
   onSave,
   saved,
   compact = false,
+  trendLabel,
 }: {
   paper: Paper;
   onSave?: (paper: Paper) => void;
   saved?: boolean;
   compact?: boolean;
+  /** Optional trend callout, e.g. "+412 citations this week" — used on the Trending page. */
+  trendLabel?: string;
 }) {
   return (
     <motion.div
@@ -38,9 +41,16 @@ export function PaperCard({
               {paper.title}
             </h3>
           </Link>
-          <Badge variant="outline" className="shrink-0 font-mono text-[11px]">
-            {paper.year}
-          </Badge>
+          <div className="flex shrink-0 items-center gap-1.5">
+            {trendLabel && (
+              <Badge variant="brass" className="gap-1">
+                <Flame className="h-3 w-3" /> {trendLabel}
+              </Badge>
+            )}
+            <Badge variant="outline" className="font-mono text-[11px]">
+              {paper.year}
+            </Badge>
+          </div>
         </div>
 
         <p className="truncate text-sm text-ink-soft">

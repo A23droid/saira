@@ -10,6 +10,11 @@ import {
   BookMarked,
   Settings,
   Compass,
+  Layers,
+  Flame,
+  History,
+  BarChart3,
+  UserCircle,
 } from "lucide-react";
 import { Logo } from "@/components/shared/logo";
 import { cn } from "@/lib/utils";
@@ -20,6 +25,13 @@ const navItems = [
   { href: "/projects", label: "Projects", icon: FolderKanban },
   { href: "/compare", label: "Compare", icon: GitCompareArrows },
   { href: "/review", label: "Literature review", icon: BookMarked },
+];
+
+const exploreItems = [
+  { href: "/collections", label: "Collections", icon: Layers },
+  { href: "/trending", label: "Trending", icon: Flame },
+  { href: "/history", label: "History", icon: History },
+  { href: "/analytics", label: "Analytics", icon: BarChart3 },
 ];
 
 export function Sidebar() {
@@ -53,7 +65,42 @@ export function Sidebar() {
             </Link>
           );
         })}
+
+        <p className="mt-5 px-3 pb-2 text-xs font-medium uppercase tracking-wide text-ink-faint">
+          Explore
+        </p>
+        {exploreItems.map((item) => {
+          const active = pathname === item.href || pathname.startsWith(item.href + "/");
+          return (
+            <Link
+              key={item.href}
+              href={item.href}
+              className={cn(
+                "flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium transition-colors",
+                active
+                  ? "bg-surface text-ink shadow-sm"
+                  : "text-ink-soft hover:bg-surface/70 hover:text-ink"
+              )}
+            >
+              <item.icon className={cn("h-4 w-4", active ? "text-teal-600" : "text-ink-faint")} />
+              {item.label}
+            </Link>
+          );
+        })}
       </nav>
+
+      <Link
+        href="/profile"
+        className={cn(
+          "flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium transition-colors",
+          pathname === "/profile"
+            ? "bg-surface text-ink shadow-sm"
+            : "text-ink-soft hover:bg-surface/70 hover:text-ink"
+        )}
+      >
+        <UserCircle className={cn("h-4 w-4", pathname === "/profile" ? "text-teal-600" : "text-ink-faint")} />
+        Profile
+      </Link>
 
       <Link
         href="/settings"

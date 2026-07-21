@@ -12,6 +12,8 @@ import {
   NotebookPen,
   BookmarkPlus,
   Plus,
+  Share2,
+  Waypoints,
 } from "lucide-react";
 import { PageHeader } from "@/components/shared/page-header";
 import { Card } from "@/components/ui/card";
@@ -20,7 +22,17 @@ import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { AIChatPanel } from "@/components/shared/ai-chat-panel";
-import { getPaperById, getNotesForPaper, similarPapers } from "@/lib/mock-data";
+import { ReadingProgressCard } from "@/components/shared/reading-progress";
+import { GraphPlaceholder } from "@/components/shared/graph-placeholder";
+import { RelatedPapersPanel } from "@/components/shared/related-papers-panel";
+import { SavedArtifactsPanel } from "@/components/shared/saved-artifacts-panel";
+import {
+  getPaperById,
+  getNotesForPaper,
+  similarPapers,
+  getRelatedLinksForPaper,
+  getSavedArtifactsForPaper,
+} from "@/lib/mock-data";
 
 export default function PaperDetailsPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
@@ -31,6 +43,8 @@ export default function PaperDetailsPage({ params }: { params: Promise<{ id: str
   if (!paper) return notFound();
 
   const related = similarPapers(paper.id, 3);
+  const relatedLinks = getRelatedLinksForPaper(paper.id);
+  const artifacts = getSavedArtifactsForPaper(paper.id);
 
   function addNote() {
     if (!draft.trim()) return;
@@ -85,11 +99,18 @@ export default function PaperDetailsPage({ params }: { params: Promise<{ id: str
             </Button>
           </Card>
 
+          <div className="mb-6">
+            <ReadingProgressCard status={paper.readingStatus} />
+          </div>
+
           <Tabs defaultValue="summary">
-            <TabsList>
+            <TabsList className="flex-wrap">
               <TabsTrigger value="summary">AI summary</TabsTrigger>
               <TabsTrigger value="extracted">Extracted info</TabsTrigger>
               <TabsTrigger value="notes">Notes ({notes.length})</TabsTrigger>
+              <TabsTrigger value="related">Related work</TabsTrigger>
+              <TabsTrigger value="graphs">Graphs</TabsTrigger>
+              <TabsTrigger value="artifacts">Artifacts</TabsTrigger>
             </TabsList>
 
             <TabsContent value="summary">
@@ -193,6 +214,36 @@ export default function PaperDetailsPage({ params }: { params: Promise<{ id: str
                   ))}
                 </div>
               )}
+            </TabsContent>
+
+            <TabsContent value="related">
+              <p className="mb-4 text-sm text-ink-soft">
+                Papers SAIRA has identified as agreeing with or challenging this one's claims.
+              </p>
+              <RelatedPapersPanel links={relatedLinks} />
+            </TabsContent>
+
+            <TabsContent value="graphs">
+              <div className="grid gap-5 sm:grid-cols-2">
+                <GraphPlaceholder
+                  icon={Share2}
+                  title="Citation graph"
+                  description="Papers this one cites, and papers that cite it, visualized as a network."
+                />
+                <GraphPlaceholder
+                  icon={Waypoints}
+                  title="Concept graph"
+                  description="Key concepts in this paper and how they connect to related work."
+                  accent="brass"
+                />
+              </div>
+            </TabsContent>
+
+            <TabsContent value="artifacts">
+              <p className="mb-4 text-sm text-ink-soft">
+                Ask AI answers and review snippets you've pinned from this paper.
+              </p>
+              <SavedArtifactsPanel artifacts={artifacts} />
             </TabsContent>
           </Tabs>
         </div>
