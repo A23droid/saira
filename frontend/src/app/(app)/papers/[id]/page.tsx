@@ -41,16 +41,15 @@ import {
   DialogFooter,
 } from "@/components/ui/dialog";
 
-import { apiFetch } from "@/lib/api/client";
-import { getPaperById } from "@/lib/api/papers";
+import { getPaperById, getPaperProjects, BackendPaper } from "@/lib/api/papers";
 import { getProjects, addPaperToProject, updateProjectPaper } from "@/lib/api/projects";
 import { getReadingData, createNote, deleteNote, createHighlight, deleteHighlight, updateReadingProgress, ProjectPaperReadingData } from "@/lib/api/reading_data";
-import { Paper, Project } from "@/lib/types";
+import { Project } from "@/lib/types";
 
 export default function PaperDetailsPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
   
-  const [paper, setPaper] = useState<Paper | null>(null);
+  const [paper, setPaper] = useState<BackendPaper | null>(null);
   const [paperProjects, setPaperProjects] = useState<Project[]>([]);
   const [allProjects, setAllProjects] = useState<Project[]>([]);
   
@@ -68,30 +67,14 @@ export default function PaperDetailsPage({ params }: { params: Promise<{ id: str
   useEffect(() => {
     let active = true;
     
-    // Promise.all([
-    //   apiFetch<Paper>(`/papers/${id}`),
-    //   apiFetch<Project[]>(`/papers/${id}/projects`),
-    //   getProjects()
-    // ])
     Promise.all([
-    getPaperById(id),
-    apiFetch<Project[]>(`/papers/${id}/projects`),
-    getProjects(),
-  ])
+      getPaperById(id),
+      getPaperProjects(id),
+      getProjects(),
+    ])
     .then(([p, pProjs, allProjs]) => {
       if (active) {
-        // Map backend schema to frontend Paper
-        const uiPaper = {
-          ...p,
-          year: p.publication_year ?? null,
-          citationCount: p.citation_count ?? 0,
-          authors: [],
-          tags: [],
-          readingStatus: "unread",
-          aiSummary: { tldr: "", keyFindings: [], methodology: "", limitations: [] },
-          extracted: { problem: "", dataset: [], method: "", metrics: [], codeAvailable: false }
-        };
-        setPaper(uiPaper as Paper);
+        setPaper(p);
         setPaperProjects(pProjs);
         setAllProjects(allProjs);
         
@@ -102,9 +85,6 @@ export default function PaperDetailsPage({ params }: { params: Promise<{ id: str
     })
     .catch((err) => {
       console.error(err);
-      if (err.status === 404) {
-        // Handled below if paper remains null
-      }
     });
     
     return () => { active = false; };
@@ -234,7 +214,7 @@ export default function PaperDetailsPage({ params }: { params: Promise<{ id: str
     <div>
       <PageHeader
         title={paper.title}
-        subtitle={`${paper.venue || "Unknown Venue"} ${paper.year || ""}`}
+        subtitle={`${paper.venue || "Unknown Venue"} ${paper.publication_year || ""}`}
         actions={
           <div className="flex gap-2">
             {selectedProjectId && (
@@ -257,15 +237,15 @@ export default function PaperDetailsPage({ params }: { params: Promise<{ id: str
 
       <div className="mb-6 flex flex-wrap items-center gap-2">
         <Badge variant="outline" className="gap-1">
-          <Quote className="h-3 w-3" /> {paper.citationCount.toLocaleString()} citations
+          <Quote className="h-3 w-3" /> {(paper.citation_count ?? 0).toLocaleString()} citations
         </Badge>
         <Badge variant="outline" className="font-mono">
           {paper.source}
         </Badge>
         
         {paperProjects.length > 0 && (
-          <div className="ml-auto flex items-center gap-2">
-            <span className="text-sm text-ink-faint">Project Context:</span>
+          <div className="w-full sm:w-auto mt-2 sm:mt-0 sm:ml-auto flex items-center gap-2">
+            <span className="text-sm text-ink-faint shrink-0">Project Context:</span>
             <Select value={selectedProjectId} onValueChange={setSelectedProjectId}>
               <SelectTrigger className="w-48 h-8 text-xs">
                 <SelectValue placeholder="Select project" />
@@ -282,20 +262,61 @@ export default function PaperDetailsPage({ params }: { params: Promise<{ id: str
 
       <div className="grid gap-6 lg:grid-cols-5">
         <div className="lg:col-span-3">
-          {/* PDF viewer placeholder */}
-          <Card className="mb-6 flex aspect-[3/4] max-h-[420px] flex-col items-center justify-center gap-3 bg-paper-dim/40 p-8 text-center">
-            <span className="flex h-12 w-12 items-center justify-center rounded-full bg-surface">
-              <FileText className="h-5 w-5 text-ink-faint" />
-            </span>
-            <p className="text-sm font-medium text-ink">PDF preview isn't available in this MVP</p>
-            <p className="max-w-xs text-xs text-ink-faint">
-              In the full product, the original PDF renders here with searchable text and highlights.
-            </p>
-            <Button variant="outline" size="sm" className="gap-1.5">
-              <ExternalLink className="h-3.5 w-3.5" />
-              Open source page
-            </Button>
-          </Card>
+          {paper.pdf_url ? (
+            <div className="mb-6 flex flex-col overflow-hidden rounded-xl border border-line bg-surface shadow-sm">
+              <div className="flex items-center justify-between border-b border-line bg-surface/50 px-4 py-2.5">
+                <span className="text-xs font-medium text-ink-soft flex items-center gap-1.5">
+                  <FileText className="h-3.5 w-3.5" />
+                  PDF Preview
+                </span>
+                <Button 
+                  variant="outline" 
+                  size="sm" 
+                  className="h-7 gap-1.5 text-xs text-ink-soft hover:text-ink" 
+                  onClick={() => window.open(paper.pdf_url, '_blank')}
+                >
+                  <ExternalLink className="h-3 w-3" />
+                  Open in new tab
+                </Button>
+              </div>
+              <div className="w-full min-h-[300px] sm:h-[600px] lg:h-[800px] bg-paper-dim/20">
+                <object
+                  data={paper.pdf_url}
+                  type="application/pdf"
+                  className="h-full w-full border-0"
+                  title={`PDF preview of ${paper.title}`}
+                >
+                  <div className="flex h-full flex-col items-center justify-center p-6 text-center bg-paper-dim/40 gap-3">
+                    <span className="flex h-12 w-12 items-center justify-center rounded-full bg-surface shadow-sm">
+                      <FileText className="h-5 w-5 text-ink-faint" />
+                    </span>
+                    <p className="text-sm font-medium text-ink">Direct preview unavailable</p>
+                    <p className="max-w-xs text-xs text-ink-faint">
+                      The publisher provided a web page or captcha instead of a direct PDF.
+                    </p>
+                    <Button variant="outline" size="sm" className="mt-2 gap-1.5" onClick={() => window.open(paper.pdf_url, '_blank')}>
+                      <ExternalLink className="h-3.5 w-3.5" />
+                      Open paper in new tab
+                    </Button>
+                  </div>
+                </object>
+              </div>
+            </div>
+          ) : (
+            <Card className="mb-6 flex w-full min-h-[300px] sm:aspect-[3/4] sm:max-h-[420px] flex-col items-center justify-center gap-3 bg-paper-dim/40 p-6 sm:p-8 text-center">
+              <span className="flex h-12 w-12 items-center justify-center rounded-full bg-surface">
+                <FileText className="h-5 w-5 text-ink-faint" />
+              </span>
+              <p className="text-sm font-medium text-ink">No PDF available</p>
+              <p className="max-w-xs text-xs text-ink-faint">
+                This paper does not have a direct PDF URL associated with it.
+              </p>
+              <Button variant="outline" size="sm" className="gap-1.5" onClick={() => window.open(`https://doi.org/${paper.doi}`, '_blank')}>
+                <ExternalLink className="h-3.5 w-3.5" />
+                Open source page
+              </Button>
+            </Card>
+          )}
 
           {paper.abstract && (
             <Card className="mb-6 p-5">
@@ -315,7 +336,7 @@ export default function PaperDetailsPage({ params }: { params: Promise<{ id: str
           </div>
 
           <Tabs defaultValue="notes">
-            <TabsList className="flex-wrap">
+            <TabsList className="w-full justify-start overflow-x-auto flex-nowrap sm:flex-wrap">
               <TabsTrigger value="notes">Notes ({readingData?.notes?.length || 0})</TabsTrigger>
               <TabsTrigger value="highlights">Highlights ({readingData?.highlights?.length || 0})</TabsTrigger>
               <TabsTrigger value="summary">AI summary</TabsTrigger>

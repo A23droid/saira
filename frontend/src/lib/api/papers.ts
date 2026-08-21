@@ -1,4 +1,5 @@
 import { apiFetch } from "./client";
+import { Project } from "../types";
 
 /** Shape returned by the backend PaperResponse schema */
 export interface BackendPaper {
@@ -23,4 +24,13 @@ export async function getPapers(skip = 0, limit = 100): Promise<BackendPaper[]> 
 
 export async function getPaperById(id: string): Promise<BackendPaper> {
   return apiFetch<BackendPaper>(`/papers/${id}`);
+}
+
+/** Returns the projects (belonging to current user) that contain this paper. */
+export async function getPaperProjects(paperId: string): Promise<Project[]> {
+  return apiFetch<Project[]>(`/papers/${paperId}/projects`);
+}
+
+export async function deletePaper(id: string): Promise<void> {
+  return apiFetch<void>(`/papers/${id}`, { method: "DELETE" });
 }

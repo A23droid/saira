@@ -8,11 +8,11 @@ class OpenAlexClient:
         self.email = email
         self.headers = {"User-Agent": f"SAIRA/1.0 (mailto:{self.email})"}
 
-    async def search_works(self, query: str, limit: int = 20) -> list[Dict[str, Any]]:
+    async def search_works(self, query: str, limit: int = 20, page: int = 1) -> list[Dict[str, Any]]:
         async with httpx.AsyncClient() as client:
             response = await client.get(
                 f"{OPENALEX_BASE_URL}/works",
-                params={"search": query, "per-page": limit, "mailto": self.email},
+                params={"search": query, "per-page": limit, "page": page, "mailto": self.email},
                 headers=self.headers
             )
             response.raise_for_status()

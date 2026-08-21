@@ -59,6 +59,17 @@ export interface Project {
   updated_at: string;
 }
 
+export interface ProjectPaper {
+  id: string;
+  project_id: string;
+  paper_id: string;
+  status?: string | null;
+  favorite: boolean;
+  priority?: number | null;
+  added_at: string;
+}
+
+
 /* ---------- v2 additions ---------- */
 
 export type CollectionIcon = "star" | "clock" | "flame" | "layers";

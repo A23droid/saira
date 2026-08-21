@@ -12,10 +12,12 @@ import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { useAuth } from "@/contexts/auth-context";
 import { Project } from "@/lib/types";
 import { getProjects } from "@/lib/api/projects";
+import { getPapers } from "@/lib/api/papers";
 
 export default function DashboardPage() {
   const { user } = useAuth();
   const [projects, setProjects] = useState<Project[]>([]);
+  const [paperCount, setPaperCount] = useState<number | null>(null);
   const firstName = user?.name.split(" ")[0] ?? "there";
 
   useEffect(() => {
@@ -26,6 +28,9 @@ export default function DashboardPage() {
         );
         setProjects(sorted);
       })
+      .catch(console.error);
+    getPapers(0, 1000)
+      .then((data) => setPaperCount(data.length))
       .catch(console.error);
   }, []);
 
@@ -49,7 +54,7 @@ export default function DashboardPage() {
 
       <div className="grid gap-4 sm:grid-cols-3">
         <StatCard icon={FolderKanban} label="Active projects" value={String(projects.length)} />
-        <StatCard icon={FileStack} label="Papers saved" value="—" accent="brass" />
+        <StatCard icon={FileStack} label="Papers saved" value={paperCount !== null ? String(paperCount) : "—"} accent="brass" />
         <StatCard icon={NotebookPen} label="Notes written" value="—" />
       </div>
 

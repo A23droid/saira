@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { motion } from "framer-motion";
-import { BookmarkPlus, Quote, FileCheck2, Flame } from "lucide-react";
+import { BookmarkPlus, Quote, FileCheck2, Flame, Star } from "lucide-react";
 import { Paper } from "@/lib/types";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -20,6 +20,9 @@ export function PaperCard({
   saved,
   compact = false,
   trendLabel,
+  disableLink = false,
+  onFavorite,
+  favorited,
 }: {
   paper: Paper;
   onSave?: (paper: Paper) => void;
@@ -27,6 +30,10 @@ export function PaperCard({
   compact?: boolean;
   /** Optional trend callout, e.g. "+412 citations this week" — used on the Trending page. */
   trendLabel?: string;
+  /** When true, the title is not a link (e.g. un-ingested search results that have no DB UUID). */
+  disableLink?: boolean;
+  onFavorite?: (paper: Paper) => void;
+  favorited?: boolean;
 }) {
   return (
     <motion.div
@@ -36,11 +43,17 @@ export function PaperCard({
     >
       <Card className="group flex flex-col gap-3 p-5 transition-shadow hover:shadow-md">
         <div className="flex items-start justify-between gap-3">
-          <Link href={`/papers/${paper.id}`} className="min-w-0">
-            <h3 className="font-display text-[1.05rem] font-medium leading-snug text-ink group-hover:text-teal-700">
+          {disableLink ? (
+            <h3 className="font-display text-[1.05rem] font-medium leading-snug text-ink min-w-0">
               {paper.title}
             </h3>
-          </Link>
+          ) : (
+            <Link href={`/papers/${paper.id}`} className="min-w-0">
+              <h3 className="font-display text-[1.05rem] font-medium leading-snug text-ink group-hover:text-teal-700">
+                {paper.title}
+              </h3>
+            </Link>
+          )}
           <div className="flex shrink-0 items-center gap-1.5">
             {trendLabel && (
               <Badge variant="brass" className="gap-1">
@@ -79,17 +92,30 @@ export function PaperCard({
             </span>
             <span className="hidden font-mono sm:inline">{paper.source}</span>
           </div>
-          {onSave && (
-            <Button
-              variant={saved ? "secondary" : "ghost"}
-              size="sm"
-              onClick={() => onSave(paper)}
-              className="gap-1.5"
-            >
-              <BookmarkPlus className="h-3.5 w-3.5" />
-              {saved ? "Saved" : "Save"}
-            </Button>
-          )}
+          <div className="flex items-center gap-2">
+            {onFavorite && (
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => onFavorite(paper)}
+                className={`gap-1.5 ${favorited ? "text-teal-600" : ""}`}
+              >
+                <Star className={`h-3.5 w-3.5 ${favorited ? "fill-teal-600 text-teal-600" : "text-ink-faint"}`} />
+                {favorited ? "Favorited" : "Favorite"}
+              </Button>
+            )}
+            {onSave && (
+              <Button
+                variant={saved ? "secondary" : "ghost"}
+                size="sm"
+                onClick={() => onSave(paper)}
+                className="gap-1.5"
+              >
+                <BookmarkPlus className="h-3.5 w-3.5" />
+                {saved ? "Saved" : "Save"}
+              </Button>
+            )}
+          </div>
         </div>
       </Card>
     </motion.div>

@@ -1,11 +1,12 @@
 import { apiFetch } from "./client";
-import { Project, ProjectPaper, Paper } from "../types"; // I might need to adjust imports
+import { Project, ProjectPaper } from "../types";
+import { BackendPaper } from "./papers";
 
 export async function getProjects(): Promise<Project[]> {
   return apiFetch<Project[]>("/projects");
 }
 
-export async function createProject(data: Partial<Project>): Promise<Project> {
+export async function createProject(data: { name: string; description?: string; color?: string }): Promise<Project> {
   return apiFetch<Project>("/projects", {
     method: "POST",
     body: JSON.stringify(data)
@@ -16,8 +17,8 @@ export async function getProjectById(id: string): Promise<Project> {
   return apiFetch<Project>(`/projects/${id}`);
 }
 
-export async function getProjectPapers(id: string): Promise<Paper[]> {
-  return apiFetch<Paper[]>(`/projects/${id}/papers`);
+export async function getProjectPapers(id: string): Promise<BackendPaper[]> {
+  return apiFetch<BackendPaper[]>(`/projects/${id}/papers`);
 }
 
 export async function updateProject(id: string, data: Partial<Project>): Promise<Project> {

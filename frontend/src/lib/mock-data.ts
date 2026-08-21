@@ -404,9 +404,7 @@ export function getProjectById(id: string) {
 }
 
 export function getPapersForProject(projectId: string) {
-  const project = getProjectById(projectId);
-  if (!project) return [];
-  return papers.filter((p) => project.paperIds.includes(p.id));
+  return [];
 }
 
 export function getNotesForPaper(paperId: string) {
