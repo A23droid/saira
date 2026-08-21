@@ -313,56 +313,32 @@ export const papers: Paper[] = [
 export const projects: Project[] = [
   {
     id: "proj1",
+    user_id: "u1",
     name: "Efficient Fine-Tuning Methods",
     description:
       "Surveying parameter-efficient fine-tuning techniques for large language models ahead of the qualifying exam.",
-    createdAt: "2026-05-02",
-    updatedAt: "2026-07-14",
+    created_at: "2026-05-02T00:00:00Z",
+    updated_at: "2026-07-14T00:00:00Z",
     color: "teal",
-    paperIds: ["p1", "p2", "p4"],
-    collaborators: [
-      { name: "Meera Anand", avatarInitial: "M" },
-      { name: "Kabir Rao", avatarInitial: "K" },
-    ],
-    milestones: {
-      papersAdded: true,
-      notesTaken: true,
-      compared: true,
-      reviewGenerated: false,
-    },
   },
   {
     id: "proj2",
+    user_id: "u1",
     name: "Retrieval & Generative Grounding",
     description:
       "Comparing retrieval-augmented approaches against diffusion-based generative baselines for grounded generation.",
-    createdAt: "2026-06-10",
-    updatedAt: "2026-07-18",
+    created_at: "2026-06-10T00:00:00Z",
+    updated_at: "2026-07-18T00:00:00Z",
     color: "brass",
-    paperIds: ["p1", "p3", "p6"],
-    collaborators: [{ name: "Meera Anand", avatarInitial: "M" }],
-    milestones: {
-      papersAdded: true,
-      notesTaken: false,
-      compared: false,
-      reviewGenerated: false,
-    },
   },
   {
     id: "proj3",
+    user_id: "u1",
     name: "Thesis Chapter 2 — Related Work",
     description: "Background reading and synthesis for the related-work chapter of the dissertation.",
-    createdAt: "2026-04-20",
-    updatedAt: "2026-07-05",
+    created_at: "2026-04-20T00:00:00Z",
+    updated_at: "2026-07-05T00:00:00Z",
     color: "ink",
-    paperIds: [],
-    collaborators: [{ name: "Meera Anand", avatarInitial: "M" }],
-    milestones: {
-      papersAdded: false,
-      notesTaken: false,
-      compared: false,
-      reviewGenerated: false,
-    },
   },
 ];
 

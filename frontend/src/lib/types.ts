@@ -1,4 +1,4 @@
-export type PaperSource = "arXiv" | "Semantic Scholar" | "PubMed" | "IEEE" | "ACL Anthology";
+export type PaperSource = "arXiv" | "Semantic Scholar" | "PubMed" | "IEEE" | "ACL Anthology" | "OpenAlex";
 
 export interface Author {
   name: string;
@@ -51,19 +51,12 @@ export interface ChatMessage {
 
 export interface Project {
   id: string;
+  user_id: string;
   name: string;
-  description: string;
-  createdAt: string;
-  updatedAt: string;
-  color: "teal" | "brass" | "ink";
-  paperIds: string[];
-  collaborators: { name: string; avatarInitial: string }[];
-  milestones: {
-    papersAdded: boolean;
-    notesTaken: boolean;
-    compared: boolean;
-    reviewGenerated: boolean;
-  };
+  description: string | null;
+  color: string;
+  created_at: string;
+  updated_at: string;
 }
 
 /* ---------- v2 additions ---------- */

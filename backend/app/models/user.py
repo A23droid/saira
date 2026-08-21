@@ -1,3 +1,9 @@
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from app.models.refresh_token import RefreshToken
+    from app.models.project import Project
+
 import uuid
 from datetime import datetime
 
@@ -62,6 +68,10 @@ class User(Base):
     )
 
     refresh_tokens: Mapped[list["RefreshToken"]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
+
+    projects: Mapped[list["Project"]] = relationship(
         back_populates="user", cascade="all, delete-orphan"
     )
 

@@ -9,7 +9,8 @@ from app.db.session import get_db
 from app.exceptions import OAuthProviderError
 from app.models.user import AuthProvider
 from app.schemas.token import TokenPair
-from app.services import auth_service, oauth_service
+from app.services.auth_service import issue_token_pair
+from app.services.oauth_service import find_or_create_oauth_user
 
 router = APIRouter(tags=["oauth-orcid"])
 
@@ -47,11 +48,11 @@ async def orcid_callback(request: Request, db: AsyncSession = Depends(get_db)) -
     # constraint is preserved without blocking sign-in.
     email = token.get("email") or f"{orcid_id}@orcid.users.saira.app"
 
-    user = await oauth_service.find_or_create_oauth_user(
+    user = await find_or_create_oauth_user(
         db,
         provider=AuthProvider.ORCID,
         provider_id=orcid_id,
         email=email,
         name=name,
     )
-    return await auth_service.issue_token_pair(db, user)
+    return await issue_token_pair(db, user)

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import Link from "next/link";
 import { Plus, FolderKanban } from "lucide-react";
 import { PageHeader } from "@/components/shared/page-header";
@@ -8,15 +8,25 @@ import { ProjectCard } from "@/components/shared/project-card";
 import { EmptyState } from "@/components/shared/empty-state";
 import { SearchBar } from "@/components/shared/search-bar";
 import { Button } from "@/components/ui/button";
-import { projects } from "@/lib/mock-data";
+import { getProjects } from "@/lib/api/projects";
+import { Project } from "@/lib/types";
 
 export default function ProjectsListPage() {
   const [query, setQuery] = useState("");
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    getProjects()
+      .then((data) => setProjects(data))
+      .catch(console.error)
+      .finally(() => setLoading(false));
+  }, []);
 
   const filtered = projects.filter(
     (p) =>
       p.name.toLowerCase().includes(query.toLowerCase()) ||
-      p.description.toLowerCase().includes(query.toLowerCase())
+      (p.description && p.description.toLowerCase().includes(query.toLowerCase()))
   );
 
   return (

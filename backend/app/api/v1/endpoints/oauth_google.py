@@ -9,7 +9,8 @@ from app.core.oauth import oauth
 from app.db.session import get_db
 from app.exceptions import AppError, OAuthProviderError
 from app.models.user import AuthProvider
-from app.services import auth_service, oauth_service
+from app.services.auth_service import issue_token_pair
+from app.services.oauth_service import find_or_create_oauth_user
 
 router = APIRouter(tags=["oauth-google"])
 
@@ -41,7 +42,7 @@ async def google_callback(request: Request, db: AsyncSession = Depends(get_db)) 
         if not userinfo or not userinfo.get("sub") or not userinfo.get("email"):
             raise OAuthProviderError("Google did not return the expected profile information.")
 
-        user = await oauth_service.find_or_create_oauth_user(
+        user = await find_or_create_oauth_user(
             db,
             provider=AuthProvider.GOOGLE,
             provider_id=userinfo["sub"],
@@ -49,7 +50,7 @@ async def google_callback(request: Request, db: AsyncSession = Depends(get_db)) 
             name=userinfo.get("name") or userinfo["email"].split("@")[0],
             avatar_url=userinfo.get("picture"),
         )
-        tokens = await auth_service.issue_token_pair(db, user)
+        tokens = await issue_token_pair(db, user)
     except (OAuthError, AppError):
         return RedirectResponse(f"{settings.FRONTEND_URL}/login?error=oauth_failed", status_code=302)
 

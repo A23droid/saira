@@ -10,6 +10,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
+import { createProject } from "@/lib/api/projects";
 
 const colorOptions = [
   { id: "teal", label: "Teal", className: "bg-teal-600" },
@@ -24,13 +25,16 @@ export default function CreateProjectPage() {
   const [color, setColor] = useState<"teal" | "brass" | "ink">("teal");
   const [creating, setCreating] = useState(false);
 
-  function handleSubmit(e: React.FormEvent) {
+  async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     setCreating(true);
-    setTimeout(() => {
-      // Mock creation — in the full product this would POST and redirect to the new id.
-      router.push("/projects/proj1");
-    }, 600);
+    try {
+      const project = await createProject({ name, description, color });
+      router.push(`/projects/${project.id}`);
+    } catch (err) {
+      console.error(err);
+      setCreating(false);
+    }
   }
 
   return (
@@ -47,6 +51,7 @@ export default function CreateProjectPage() {
               value={name}
               onChange={(e) => setName(e.target.value)}
               required
+              disabled={creating}
             />
           </div>
 
@@ -58,6 +63,7 @@ export default function CreateProjectPage() {
               value={description}
               onChange={(e) => setDescription(e.target.value)}
               rows={4}
+              disabled={creating}
             />
           </div>
 
@@ -69,6 +75,7 @@ export default function CreateProjectPage() {
                   type="button"
                   key={c.id}
                   onClick={() => setColor(c.id)}
+                  disabled={creating}
                   className={cn(
                     "flex h-9 w-9 items-center justify-center rounded-full border-2 transition-all",
                     color === c.id ? "border-ink scale-105" : "border-transparent"
@@ -90,7 +97,7 @@ export default function CreateProjectPage() {
           </div>
 
           <div className="mt-2 flex justify-end gap-2">
-            <Button type="button" variant="ghost" onClick={() => router.push("/projects")}>
+            <Button type="button" variant="ghost" onClick={() => router.push("/projects")} disabled={creating}>
               Cancel
             </Button>
             <Button type="submit" disabled={!name.trim() || creating} className="gap-1.5">

@@ -9,7 +9,23 @@ from app.models.user import User
 from app.schemas.auth import LoginRequest, RegisterRequest
 from app.schemas.token import Message
 from app.schemas.user import UserRead, UserUpdateRequest
-from app.services import auth_service, avatar_service, user_service
+from app.services import user_service
+from app.services.auth_service import (
+    register_user,
+    authenticate_local_user,
+    issue_token_pair,
+    rotate_refresh_token,
+    revoke_refresh_token,
+)
+from app.services.avatar_service import save_avatar
+
+# from app.services.auth_service import (
+#     register_user,
+#     authenticate_local_user,
+#     issue_token_pair,
+#     rotate_refresh_token,
+#     revoke_refresh_token,
+# )
 
 router = APIRouter(tags=["auth"])
 
@@ -24,8 +40,8 @@ async def register(
     are set on this response, the same as `/login` — so the frontend can go
     straight from the sign-up form to the dashboard without a second request.
     """
-    user = await auth_service.register_user(db, payload)
-    tokens = await auth_service.issue_token_pair(db, user)
+    user = await register_user(db, payload)
+    tokens = await issue_token_pair(db, user)
     set_auth_cookies(response, tokens.access_token, tokens.refresh_token)
     return user
 
@@ -35,8 +51,8 @@ async def login(
     payload: LoginRequest, response: Response, db: AsyncSession = Depends(get_db)
 ) -> User:
     """Exchange email + password for a session, set as HttpOnly cookies."""
-    user = await auth_service.authenticate_local_user(db, payload.email, payload.password)
-    tokens = await auth_service.issue_token_pair(db, user)
+    user = await authenticate_local_user(db, payload.email, payload.password)
+    tokens = await issue_token_pair(db, user)
     set_auth_cookies(response, tokens.access_token, tokens.refresh_token)
     return user
 
@@ -56,7 +72,7 @@ async def refresh(
     if not raw_refresh_token:
         raise NotAuthenticatedError("No active session to refresh.")
 
-    tokens = await auth_service.rotate_refresh_token(db, raw_refresh_token)
+    tokens = await rotate_refresh_token(db, raw_refresh_token)
     set_auth_cookies(response, tokens.access_token, tokens.refresh_token)
     return Message(detail="Session refreshed.")
 
@@ -72,7 +88,7 @@ async def logout(
     """
     raw_refresh_token = request.cookies.get(REFRESH_TOKEN_COOKIE)
     if raw_refresh_token:
-        await auth_service.revoke_refresh_token(db, raw_refresh_token)
+        await revoke_refresh_token(db, raw_refresh_token)
 
     clear_auth_cookies(response)
     return Message(detail="Logged out successfully.")
@@ -110,5 +126,5 @@ async def upload_avatar(
     account or a Google account that already has a provider-supplied
     picture — a fresh upload always takes precedence from this point on.
     """
-    avatar_url = await avatar_service.save_avatar(current_user.id, file)
+    avatar_url = await save_avatar(current_user.id, file)
     return await user_service.set_user_avatar_url(db, current_user, avatar_url)

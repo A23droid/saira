@@ -1,7 +1,8 @@
 "use client";
 
-import { useMemo, useState } from "react";
-import { SlidersHorizontal, Sparkles, SearchX } from "lucide-react";
+import { useMemo, useState, useEffect } from "react";
+import { useRouter } from "next/navigation";
+import { SlidersHorizontal, Sparkles, SearchX, Loader2 } from "lucide-react";
 import { PageHeader } from "@/components/shared/page-header";
 import { SearchBar } from "@/components/shared/search-bar";
 import { PaperCard } from "@/components/shared/paper-card";
@@ -17,10 +18,11 @@ import {
   DialogFooter,
 } from "@/components/ui/dialog";
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from "@/components/ui/select";
-import { papers, projects } from "@/lib/mock-data";
-import { Paper, PaperSource } from "@/lib/types";
+import { Project, Paper, PaperSource } from "@/lib/types";
+import { getProjects } from "@/lib/api/projects";
+import { searchPapersExternal, ingestPaper, OpenAlexSearchResult } from "@/lib/api/search";
 
-const allSources: PaperSource[] = ["arXiv", "Semantic Scholar", "PubMed", "IEEE", "ACL Anthology"];
+const allSources: PaperSource[] = ["arXiv", "Semantic Scholar", "PubMed", "IEEE", "ACL Anthology", "OpenAlex"];
 const suggestions = [
   "parameter-efficient fine-tuning",
   "retrieval-augmented generation",
@@ -28,25 +30,80 @@ const suggestions = [
   "diffusion models",
 ];
 
+// Helper to map search results to the expected UI type to preserve the layout
+function mapToUIPaper(r: OpenAlexSearchResult): Paper {
+  return {
+    id: r.openalex_id || r.doi || r.title,
+    title: r.title || "Untitled",
+    authors: [],
+    year: r.publication_year || new Date().getFullYear(),
+    venue: r.venue || "Unknown Venue",
+    source: (r.source as PaperSource) || "OpenAlex",
+    abstract: r.abstract || "No abstract provided.",
+    citationCount: r.citation_count || 0,
+    tags: [],
+    pdfUrl: r.pdf_url,
+    savedToProjectIds: [],
+    readingStatus: "unread",
+    aiSummary: {
+      tldr: "",
+      keyFindings: [],
+      methodology: "",
+      limitations: []
+    },
+    extracted: {
+      problem: "",
+      dataset: [],
+      method: "",
+      metrics: [],
+      codeAvailable: false
+    }
+  } as Paper;
+}
+
 export default function SearchPapersPage() {
+  const router = useRouter();
   const [query, setQuery] = useState("");
   const [submittedQuery, setSubmittedQuery] = useState("");
   const [sourceFilter, setSourceFilter] = useState<string>("all");
   const [sortBy, setSortBy] = useState<string>("relevance");
-  const [savedIds, setSavedIds] = useState<Set<string>>(new Set(["p1", "p2", "p4"]));
+  const [savedIds, setSavedIds] = useState<Set<string>>(new Set());
   const [pickerPaper, setPickerPaper] = useState<Paper | null>(null);
+  
+  const [searchResults, setSearchResults] = useState<Paper[]>([]);
+  const [isSearching, setIsSearching] = useState(false);
+  const [projects, setProjects] = useState<Project[]>([]);
+
+  useEffect(() => {
+    getProjects().then(setProjects).catch(console.error);
+  }, []);
+
+  useEffect(() => {
+    if (!submittedQuery.trim()) {
+      setSearchResults([]);
+      return;
+    }
+    
+    let active = true;
+    setIsSearching(true);
+    
+    searchPapersExternal(submittedQuery, 20)
+      .then((data) => {
+        if (active) {
+          setSearchResults(data.map(mapToUIPaper));
+        }
+      })
+      .catch(console.error)
+      .finally(() => {
+        if (active) setIsSearching(false);
+      });
+      
+    return () => { active = false; };
+  }, [submittedQuery]);
 
   const results = useMemo(() => {
-    let list = papers;
-    if (submittedQuery.trim()) {
-      const q = submittedQuery.toLowerCase();
-      list = list.filter(
-        (p) =>
-          p.title.toLowerCase().includes(q) ||
-          p.tags.some((t) => t.toLowerCase().includes(q)) ||
-          p.abstract.toLowerCase().includes(q)
-      );
-    }
+    let list = searchResults;
+    
     if (sourceFilter !== "all") {
       list = list.filter((p) => p.source === sourceFilter);
     }
@@ -56,13 +113,30 @@ export default function SearchPapersPage() {
       list = [...list].sort((a, b) => b.citationCount - a.citationCount);
     }
     return list;
-  }, [submittedQuery, sourceFilter, sortBy]);
+  }, [searchResults, sourceFilter, sortBy]);
+
+  const handleSaveToProject = async (projId: string) => {
+    if (!pickerPaper || !pickerPaper.id) return;
+    
+    // In our mapped UI paper, 'id' is currently storing the openalex_id for this purpose
+    const openalexId = pickerPaper.id;
+    
+    try {
+      const res = await ingestPaper(openalexId, projId);
+      setSavedIds((prev) => new Set(prev).add(openalexId));
+      router.push(`/papers/${res.paper.id}`);
+    } catch (err) {
+      console.error("Failed to save paper", err);
+    } finally {
+      setPickerPaper(null);
+    }
+  };
 
   return (
     <div>
       <PageHeader
         title="Search papers"
-        subtitle="Query arXiv, Semantic Scholar, PubMed, and more from one place."
+        subtitle="Query OpenAlex and ingest papers into your projects."
       />
 
       <SearchBar
@@ -118,17 +192,17 @@ export default function SearchPapersPage() {
         </Select>
 
         <div className="ml-auto flex items-center gap-1.5 text-xs text-ink-faint">
-          <Sparkles className="h-3.5 w-3.5 text-teal-600" />
-          {results.length} results
+          {isSearching ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5 text-teal-600" />}
+          {isSearching ? "Searching..." : `${results.length} results`}
         </div>
       </div>
 
       <div className="mt-5 flex flex-col gap-3">
-        {results.length === 0 ? (
+        {results.length === 0 && !isSearching && submittedQuery ? (
           <EmptyState
             icon={SearchX}
             title="No papers matched"
-            description="Try a different keyword, or clear your filters to see the full mock library."
+            description="Try a different keyword."
             actionLabel="Clear search"
             onAction={() => {
               setQuery("");
@@ -158,19 +232,17 @@ export default function SearchPapersPage() {
             </DialogDescription>
           </DialogHeader>
           <div className="flex flex-col gap-2">
+            {projects.length === 0 && (
+              <p className="text-sm text-ink-faint text-center py-4">No projects yet. Create one first.</p>
+            )}
             {projects.map((proj) => (
               <button
                 key={proj.id}
-                onClick={() => {
-                  if (pickerPaper) {
-                    setSavedIds((prev) => new Set(prev).add(pickerPaper.id));
-                  }
-                  setPickerPaper(null);
-                }}
+                onClick={() => handleSaveToProject(proj.id)}
                 className="flex items-center justify-between rounded-xl border border-line px-4 py-3 text-left text-sm hover:border-teal-500 hover:bg-teal-50/40"
               >
                 <span className="font-medium text-ink">{proj.name}</span>
-                <Badge variant="outline">{proj.paperIds.length} papers</Badge>
+                <Badge variant="outline" className="capitalize">{proj.color || "teal"}</Badge>
               </button>
             ))}
           </div>

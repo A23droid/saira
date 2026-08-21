@@ -1,6 +1,6 @@
 "use client";
 
-import { use, useMemo, useState } from "react";
+import { use, useState, useEffect } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import {
@@ -11,6 +11,9 @@ import {
   Calendar,
   Share2,
   Waypoints,
+  Settings,
+  Trash2,
+  Edit2
 } from "lucide-react";
 import { PageHeader } from "@/components/shared/page-header";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
@@ -28,48 +31,162 @@ import { LiteratureReviewPanel } from "@/components/shared/literature-review-pan
 import { GraphPlaceholder } from "@/components/shared/graph-placeholder";
 import { SavedArtifactsPanel } from "@/components/shared/saved-artifacts-panel";
 import {
-  getProjectById,
-  getPapersForProject,
-  chatMessages,
-  notes as allNotes,
-  getSavedArtifactsForProject,
-} from "@/lib/mock-data";
-import { notFound } from "next/navigation";
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+  DialogFooter,
+} from "@/components/ui/dialog";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
+import { Label } from "@/components/ui/label";
+import { cn } from "@/lib/utils";
+
+import { Project, Paper } from "@/lib/types";
+import { getProjectById, getProjectPapers, updateProject, deleteProject, removePaperFromProject } from "@/lib/api/projects";
+// Mocks for non-MVP features
+import { chatMessages, notes as allNotes, getSavedArtifactsForProject } from "@/lib/mock-data";
+
+const colorOptions = [
+  { id: "teal", label: "Teal", className: "bg-teal-600" },
+  { id: "brass", label: "Brass", className: "bg-brass-600" },
+  { id: "ink", label: "Ink", className: "bg-ink" },
+] as const;
 
 export default function ProjectDetailsPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
-  const project = getProjectById(id);
   const searchParams = useSearchParams();
   const router = useRouter();
   const initialTab = searchParams.get("tab") || "overview";
+  
+  const [project, setProject] = useState<Project | null>(null);
+  const [projectPapers, setProjectPapers] = useState<Paper[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [notFound, setNotFound] = useState(false);
+  
   const [compareSelection, setCompareSelection] = useState<string[]>([]);
 
-  if (!project) return notFound();
+  const [isEditDialogOpen, setIsEditDialogOpen] = useState(false);
+  const [editName, setEditName] = useState("");
+  const [editDescription, setEditDescription] = useState("");
+  const [editColor, setEditColor] = useState<"teal"|"brass"|"ink">("teal");
+  
+  useEffect(() => {
+    let active = true;
+    setLoading(true);
+    
+    Promise.all([
+      getProjectById(id),
+      getProjectPapers(id)
+    ])
+    .then(([proj, papers]) => {
+      if (active) {
+        setProject(proj);
+        // Ensure UI mock mappings are handled for papers
+        setProjectPapers(papers.map((p: any) => ({
+          ...p,
+          year: p.publication_year || null,
+          citationCount: p.citation_count || 0,
+          authors: p.authors || [],
+          tags: p.tags || [],
+          readingStatus: "unread",
+          aiSummary: { tldr: "", keyFindings: [], methodology: "", limitations: [] },
+          extracted: { problem: "", dataset: [], method: "", metrics: [], codeAvailable: false }
+        })));
+        setEditName(proj.name);
+        setEditDescription(proj.description || "");
+        setEditColor((proj.color as any) || "teal");
+        setLoading(false);
+      }
+    })
+    .catch((err) => {
+      console.error(err);
+      if (err.status === 404) setNotFound(true);
+      setLoading(false);
+    });
+    
+    return () => { active = false; };
+  }, [id]);
 
-  const projectPapers = getPapersForProject(project.id);
-  const projectNotes = allNotes.filter((n) => projectPapers.some((p) => p.id === n.paperId));
+  if (loading) return <div className="p-10 text-center text-ink-faint">Loading project...</div>;
+  if (notFound || !project) return <div className="p-10 text-center text-red-500">Project not found.</div>;
+
+  // We haven't implemented project-scoped notes for this list view yet, so we'll mock the count to 0 for MVP
+  const projectNotesCount = 0; 
   const selectedPapers = projectPapers.filter((p) => compareSelection.includes(p.id));
-  const projectArtifacts = getSavedArtifactsForProject(project.id);
+  const projectArtifacts = getSavedArtifactsForProject(project.id); // Stubbed
 
   const milestones = [
-    { label: "Papers added", done: project.milestones.papersAdded },
-    { label: "Notes taken", done: project.milestones.notesTaken },
-    { label: "Compared", done: project.milestones.compared },
-    { label: "Review drafted", done: project.milestones.reviewGenerated },
+    { label: "Papers added", done: projectPapers.length > 0 },
+    { label: "Notes taken", done: projectNotesCount > 0 },
+    { label: "Compared", done: false },
+    { label: "Review drafted", done: false },
   ];
+
+  const handleEditSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    try {
+      const updated = await updateProject(project.id, {
+        name: editName,
+        description: editDescription,
+        color: editColor
+      });
+      setProject({ ...project, ...updated });
+      setIsEditDialogOpen(false);
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  const handleDeleteProject = async () => {
+    if (confirm("Are you sure you want to delete this project? This cannot be undone.")) {
+      try {
+        await deleteProject(project.id);
+        router.push("/projects");
+      } catch (err) {
+        console.error(err);
+      }
+    }
+  };
 
   return (
     <div>
       <PageHeader
         title={project.name}
-        subtitle={project.description}
+        subtitle={project.description || "No description provided."}
         actions={
-          <Link href="/search">
-            <Button className="gap-1.5">
-              <Plus className="h-3.5 w-3.5" />
-              Add papers
-            </Button>
-          </Link>
+          <div className="flex gap-2 items-center">
+            <Link href="/search">
+              <Button className="gap-1.5">
+                <Plus className="h-3.5 w-3.5" />
+                Add papers
+              </Button>
+            </Link>
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button variant="ghost" size="icon">
+                  <Settings className="h-4 w-4" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end">
+                <DropdownMenuItem onClick={() => setIsEditDialogOpen(true)}>
+                  <Edit2 className="mr-2 h-4 w-4" />
+                  Edit Project
+                </DropdownMenuItem>
+                <DropdownMenuItem className="text-red-600" onClick={handleDeleteProject}>
+                  <Trash2 className="mr-2 h-4 w-4" />
+                  Delete Project
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          </div>
         }
       />
 
@@ -102,20 +219,12 @@ export default function ProjectDetailsPage({ params }: { params: Promise<{ id: s
               <div className="flex items-center gap-2 text-sm font-medium text-ink">
                 <Calendar className="h-4 w-4 text-ink-faint" /> Created
               </div>
-              <p className="-mt-2 text-sm text-ink-soft">{project.createdAt}</p>
-              <div className="flex items-center gap-2 text-sm font-medium text-ink">
-                <Users className="h-4 w-4 text-ink-faint" /> Collaborators
+              <p className="-mt-2 text-sm text-ink-soft">{new Date(project.created_at || "").toLocaleDateString()}</p>
+              
+              <div className="flex items-center gap-2 text-sm font-medium text-ink mt-2">
+                <Calendar className="h-4 w-4 text-ink-faint" /> Last updated
               </div>
-              <div className="-mt-2 flex items-center gap-2">
-                {project.collaborators.map((c) => (
-                  <div key={c.name} className="flex items-center gap-1.5">
-                    <Avatar className="h-6 w-6">
-                      <AvatarFallback className="text-[10px]">{c.avatarInitial}</AvatarFallback>
-                    </Avatar>
-                    <span className="text-xs text-ink-soft">{c.name}</span>
-                  </div>
-                ))}
-              </div>
+              <p className="-mt-2 text-sm text-ink-soft">{new Date(project.updated_at || "").toLocaleDateString()}</p>
             </Card>
           </div>
 
@@ -133,7 +242,7 @@ export default function ProjectDetailsPage({ params }: { params: Promise<{ id: s
                 <NotebookPen className="h-4 w-4 text-teal-600" />
                 <h3 className="font-medium text-ink">Notes</h3>
               </div>
-              <p className="font-display text-3xl text-ink">{projectNotes.length}</p>
+              <p className="font-display text-3xl text-ink">{projectNotesCount}</p>
               <p className="mt-1 text-sm text-ink-soft">notes across saved papers</p>
             </Card>
           </div>
@@ -165,7 +274,26 @@ export default function ProjectDetailsPage({ params }: { params: Promise<{ id: s
           ) : (
             <div className="flex flex-col gap-3">
               {projectPapers.map((p) => (
-                <PaperCard key={p.id} paper={p} />
+                <div key={p.id} className="relative group">
+                  <PaperCard paper={p} />
+                  <Button
+                    variant="destructive"
+                    size="icon"
+                    className="absolute top-4 right-4 opacity-0 group-hover:opacity-100 transition-opacity"
+                    onClick={async () => {
+                      if (confirm("Remove this paper from the project?")) {
+                        try {
+                          await removePaperFromProject(project.id, p.id);
+                          setProjectPapers((prev) => prev.filter((paper) => paper.id !== p.id));
+                        } catch (err) {
+                          console.error("Failed to remove paper:", err);
+                        }
+                      }
+                    }}
+                  >
+                    <Trash2 className="h-4 w-4" />
+                  </Button>
+                </div>
               ))}
             </div>
           )}
@@ -174,7 +302,7 @@ export default function ProjectDetailsPage({ params }: { params: Promise<{ id: s
         <TabsContent value="chat">
           <div className="h-[560px]">
             <AIChatPanel
-              initialMessages={chatMessages}
+              initialMessages={[]}
               contextLabel={`Answering from ${projectPapers.length} papers in ${project.name}`}
             />
           </div>
@@ -196,7 +324,7 @@ export default function ProjectDetailsPage({ params }: { params: Promise<{ id: s
                 {projectPapers.map((p) => (
                   <label
                     key={p.id}
-                    className="flex items-center gap-3 rounded-xl border border-line bg-surface px-4 py-3 text-sm hover:border-teal-500/60"
+                    className="flex items-center gap-3 rounded-xl border border-line bg-surface px-4 py-3 text-sm hover:border-teal-500/60 cursor-pointer"
                   >
                     <Checkbox
                       checked={compareSelection.includes(p.id)}
@@ -210,7 +338,7 @@ export default function ProjectDetailsPage({ params }: { params: Promise<{ id: s
                         );
                       }}
                     />
-                    <span className="text-ink">{p.title}</span>
+                    <span className="text-ink font-medium">{p.title}</span>
                   </label>
                 ))}
               </div>
@@ -234,9 +362,66 @@ export default function ProjectDetailsPage({ params }: { params: Promise<{ id: s
           <p className="mb-4 text-sm text-ink-soft">
             Answers and snippets you've pinned from Ask AI and the literature review draft.
           </p>
-          <SavedArtifactsPanel artifacts={projectArtifacts} />
+          <SavedArtifactsPanel artifacts={[]} />
         </TabsContent>
       </Tabs>
+      
+      {/* Edit Project Dialog */}
+      <Dialog open={isEditDialogOpen} onOpenChange={setIsEditDialogOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Edit Project</DialogTitle>
+            <DialogDescription>
+              Update your project's details below.
+            </DialogDescription>
+          </DialogHeader>
+          <form onSubmit={handleEditSubmit} className="flex flex-col gap-5 mt-2">
+            <div className="flex flex-col gap-1.5">
+              <Label htmlFor="edit-name">Project name</Label>
+              <Input
+                id="edit-name"
+                value={editName}
+                onChange={(e) => setEditName(e.target.value)}
+                required
+              />
+            </div>
+
+            <div className="flex flex-col gap-1.5">
+              <Label htmlFor="edit-desc">Description</Label>
+              <Textarea
+                id="edit-desc"
+                value={editDescription}
+                onChange={(e) => setEditDescription(e.target.value)}
+                rows={3}
+              />
+            </div>
+
+            <div className="flex flex-col gap-2">
+              <Label>Color tag</Label>
+              <div className="flex gap-3">
+                {colorOptions.map((c) => (
+                  <button
+                    type="button"
+                    key={c.id}
+                    onClick={() => setEditColor(c.id)}
+                    className={cn(
+                      "flex h-9 w-9 items-center justify-center rounded-full border-2 transition-all",
+                      editColor === c.id ? "border-ink scale-105" : "border-transparent"
+                    )}
+                    aria-label={c.label}
+                  >
+                    <span className={cn("h-5 w-5 rounded-full", c.className)} />
+                  </button>
+                ))}
+              </div>
+            </div>
+            <DialogFooter>
+              <Button type="button" variant="ghost" onClick={() => setIsEditDialogOpen(false)}>Cancel</Button>
+              <Button type="submit">Save changes</Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
