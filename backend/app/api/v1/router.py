@@ -1,6 +1,6 @@
 from fastapi import APIRouter
 
-from app.api.v1.endpoints import auth, oauth_google, oauth_orcid, projects, papers, search
+from app.api.v1.endpoints import auth, oauth_google, oauth_orcid, projects, papers, search, ai
 
 api_router = APIRouter()
 
@@ -10,3 +10,4 @@ api_router.include_router(oauth_orcid.router, prefix="/auth")
 api_router.include_router(projects.router, prefix="/projects", tags=["projects"])
 api_router.include_router(papers.router, prefix="/papers", tags=["papers"])
 api_router.include_router(search.router, prefix="/search", tags=["search"])
+api_router.include_router(ai.router, prefix="/ai", tags=["ai"])

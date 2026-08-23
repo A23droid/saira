@@ -44,7 +44,9 @@ import {
 import { getPaperById, getPaperProjects, BackendPaper } from "@/lib/api/papers";
 import { getProjects, addPaperToProject, updateProjectPaper } from "@/lib/api/projects";
 import { getReadingData, createNote, deleteNote, createHighlight, deleteHighlight, updateReadingProgress, ProjectPaperReadingData } from "@/lib/api/reading_data";
+import { fetchPaperSummary, fetchPaperExtraction, AISummaryResponse, AIExtractionResponse, modelLabel } from "@/lib/api/ai";
 import { Project } from "@/lib/types";
+import { Loader2 } from "lucide-react";
 
 export default function PaperDetailsPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
@@ -62,6 +64,17 @@ export default function PaperDetailsPage({ params }: { params: Promise<{ id: str
   
   const [isDialogOpen, setIsDialogOpen] = useState(false);
   const [isHighlightDialogOpen, setIsHighlightDialogOpen] = useState(false);
+
+  // AI state
+  const [aiSummary, setAiSummary] = useState<AISummaryResponse | null>(null);
+  const [aiSummaryLoading, setAiSummaryLoading] = useState(false);
+  const [aiSummaryError, setAiSummaryError] = useState<string | null>(null);
+  const [aiSummaryLoaded, setAiSummaryLoaded] = useState(false);
+
+  const [aiExtraction, setAiExtraction] = useState<AIExtractionResponse | null>(null);
+  const [aiExtractionLoading, setAiExtractionLoading] = useState(false);
+  const [aiExtractionError, setAiExtractionError] = useState<string | null>(null);
+  const [aiExtractionLoaded, setAiExtractionLoaded] = useState(false);
   
   // Fetch Paper & Projects it belongs to
   useEffect(() => {
@@ -273,7 +286,7 @@ export default function PaperDetailsPage({ params }: { params: Promise<{ id: str
                   variant="outline" 
                   size="sm" 
                   className="h-7 gap-1.5 text-xs text-ink-soft hover:text-ink" 
-                  onClick={() => window.open(paper.pdf_url, '_blank')}
+                  onClick={() => window.open(paper.pdf_url ?? undefined, '_blank')}
                 >
                   <ExternalLink className="h-3 w-3" />
                   Open in new tab
@@ -294,7 +307,7 @@ export default function PaperDetailsPage({ params }: { params: Promise<{ id: str
                     <p className="max-w-xs text-xs text-ink-faint">
                       The publisher provided a web page or captcha instead of a direct PDF.
                     </p>
-                    <Button variant="outline" size="sm" className="mt-2 gap-1.5" onClick={() => window.open(paper.pdf_url, '_blank')}>
+                    <Button variant="outline" size="sm" className="mt-2 gap-1.5" onClick={() => window.open(paper.pdf_url ?? undefined, '_blank')}>
                       <ExternalLink className="h-3.5 w-3.5" />
                       Open paper in new tab
                     </Button>
@@ -444,15 +457,158 @@ export default function PaperDetailsPage({ params }: { params: Promise<{ id: str
             </TabsContent>
 
             <TabsContent value="summary">
-              <Card className="p-6">
-                <p className="text-sm text-ink-soft italic">AI analysis not implemented in this MVP.</p>
-              </Card>
+              {!aiSummaryLoaded ? (
+                <div className="flex justify-center py-8">
+                  <Button
+                    onClick={async () => {
+                      setAiSummaryLoading(true);
+                      setAiSummaryError(null);
+                      try {
+                        const result = await fetchPaperSummary(id);
+                        setAiSummary(result);
+                        setAiSummaryLoaded(true);
+                      } catch (err: unknown) {
+                        setAiSummaryError(err instanceof Error ? err.message : "Failed to generate summary.");
+                      } finally {
+                        setAiSummaryLoading(false);
+                      }
+                    }}
+                    disabled={aiSummaryLoading}
+                    className="gap-2"
+                  >
+                    {aiSummaryLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
+                    {aiSummaryLoading ? "Generating summary…" : "Generate AI Summary"}
+                  </Button>
+                </div>
+              ) : aiSummaryError ? (
+                <Alert className="border-red-200 bg-red-50">
+                  <AlertCircle className="h-4 w-4 text-red-500" />
+                  <AlertTitle className="text-red-800">AI Error</AlertTitle>
+                  <AlertDescription className="text-red-700">{aiSummaryError}</AlertDescription>
+                </Alert>
+              ) : aiSummary ? (
+                <div className="flex flex-col gap-4">
+                  <div className="flex items-center gap-2">
+                    <Badge variant="outline" className="text-teal-700 border-teal-300 bg-teal-50 text-[10px]">
+                      {modelLabel(aiSummary.model) || "AI Model"} · via Groq
+                    </Badge>
+                  </div>
+                  {aiSummary.tldr && (
+                    <Card className="p-4">
+                      <h4 className="mb-1.5 text-xs font-semibold uppercase tracking-wider text-ink-faint">TL;DR</h4>
+                      <p className="text-sm leading-relaxed text-ink">{aiSummary.tldr}</p>
+                    </Card>
+                  )}
+                  {aiSummary.key_findings.length > 0 && (
+                    <Card className="p-4">
+                      <h4 className="mb-2 text-xs font-semibold uppercase tracking-wider text-ink-faint">Key Findings</h4>
+                      <ul className="flex flex-col gap-1.5">
+                        {aiSummary.key_findings.map((f, i) => (
+                          <li key={i} className="flex items-start gap-2 text-sm text-ink">
+                            <span className="mt-1 h-1.5 w-1.5 shrink-0 rounded-full bg-teal-500" />
+                            {f}
+                          </li>
+                        ))}
+                      </ul>
+                    </Card>
+                  )}
+                  {aiSummary.methodology && (
+                    <Card className="p-4">
+                      <h4 className="mb-1.5 text-xs font-semibold uppercase tracking-wider text-ink-faint">Methodology</h4>
+                      <p className="text-sm leading-relaxed text-ink">{aiSummary.methodology}</p>
+                    </Card>
+                  )}
+                  {aiSummary.contributions.length > 0 && (
+                    <Card className="p-4">
+                      <h4 className="mb-2 text-xs font-semibold uppercase tracking-wider text-ink-faint">Contributions</h4>
+                      <ul className="flex flex-col gap-1.5">
+                        {aiSummary.contributions.map((c, i) => (
+                          <li key={i} className="flex items-start gap-2 text-sm text-ink">
+                            <span className="mt-1 h-1.5 w-1.5 shrink-0 rounded-full bg-teal-500" />
+                            {c}
+                          </li>
+                        ))}
+                      </ul>
+                    </Card>
+                  )}
+                  {aiSummary.limitations.length > 0 && (
+                    <Card className="p-4">
+                      <h4 className="mb-2 text-xs font-semibold uppercase tracking-wider text-ink-faint">Limitations</h4>
+                      <ul className="flex flex-col gap-1.5">
+                        {aiSummary.limitations.map((l, i) => (
+                          <li key={i} className="flex items-start gap-2 text-sm text-ink-soft">
+                            <span className="mt-1 h-1.5 w-1.5 shrink-0 rounded-full bg-amber-400" />
+                            {l}
+                          </li>
+                        ))}
+                      </ul>
+                    </Card>
+                  )}
+                </div>
+              ) : null}
             </TabsContent>
 
             <TabsContent value="extracted">
-              <Card className="p-6">
-                <p className="text-sm text-ink-soft italic">Information extraction not implemented in this MVP.</p>
-              </Card>
+              {!aiExtractionLoaded ? (
+                <div className="flex justify-center py-8">
+                  <Button
+                    onClick={async () => {
+                      setAiExtractionLoading(true);
+                      setAiExtractionError(null);
+                      try {
+                        const result = await fetchPaperExtraction(id);
+                        setAiExtraction(result);
+                        setAiExtractionLoaded(true);
+                      } catch (err: unknown) {
+                        setAiExtractionError(err instanceof Error ? err.message : "Failed to extract information.");
+                      } finally {
+                        setAiExtractionLoading(false);
+                      }
+                    }}
+                    disabled={aiExtractionLoading}
+                    className="gap-2"
+                  >
+                    {aiExtractionLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <ListChecks className="h-4 w-4" />}
+                    {aiExtractionLoading ? "Extracting…" : "Extract Research Info"}
+                  </Button>
+                </div>
+              ) : aiExtractionError ? (
+                <Alert className="border-red-200 bg-red-50">
+                  <AlertCircle className="h-4 w-4 text-red-500" />
+                  <AlertTitle className="text-red-800">AI Error</AlertTitle>
+                  <AlertDescription className="text-red-700">{aiExtractionError}</AlertDescription>
+                </Alert>
+              ) : aiExtraction ? (
+                <div className="flex flex-col gap-4">
+                  <div className="flex items-center gap-2">
+                    <Badge variant="outline" className="text-teal-700 border-teal-300 bg-teal-50 text-[10px]">
+                      GPT-OSS 120B · via Groq
+                    </Badge>
+                  </div>
+                  {([
+                    { label: "Datasets", items: aiExtraction.datasets },
+                    { label: "Models", items: aiExtraction.models },
+                    { label: "Algorithms", items: aiExtraction.algorithms },
+                    { label: "Metrics", items: aiExtraction.metrics },
+                    { label: "Limitations", items: aiExtraction.limitations },
+                    { label: "Future Work", items: aiExtraction.future_work },
+                  ] as { label: string; items: string[] }[]).map(({ label, items }) =>
+                    items.length > 0 ? (
+                      <Card key={label} className="p-4">
+                        <h4 className="mb-2 text-xs font-semibold uppercase tracking-wider text-ink-faint">{label}</h4>
+                        <ul className="flex flex-col gap-1.5">
+                          {items.map((item, i) => (
+                            <li key={i} className="flex items-start gap-2 text-sm text-ink">
+                              <span className="mt-1 h-1.5 w-1.5 shrink-0 rounded-full bg-teal-500" />
+                              {item}
+                            </li>
+                          ))}
+                        </ul>
+                      </Card>
+                    ) : null
+                  )}
+                </div>
+              ) : null}
             </TabsContent>
 
             <TabsContent value="related">
@@ -484,7 +640,8 @@ export default function PaperDetailsPage({ params }: { params: Promise<{ id: str
           <div className="h-[420px]">
             <AIChatPanel
               initialMessages={[]}
-              contextLabel={`Answering from “${paper.title.slice(0, 30)}${paper.title.length > 30 ? "…" : ""}”`}
+              paperId={id}
+              contextLabel={`Answering from "${paper.title.slice(0, 30)}${paper.title.length > 30 ? "…" : ""}"`}
               placeholder="Ask a question about this paper…"
             />
           </div>

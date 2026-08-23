@@ -112,6 +112,15 @@ class Settings(BaseSettings):
             else "https://api.orcid.org"
         )
 
+    # --- Groq AI -------------------------------------------------------
+    # Obtain a key from https://console.groq.com/keys
+    # Keep this server-side only — never expose to the frontend.
+    GROQ_API_KEY: str = ""
+    # Primary model: used for Q&A, summaries, research gap, comparison, recommendations
+    GROQ_PRIMARY_MODEL: str = "openai/gpt-oss-120b"
+    # Extraction model: used for structured dataset/model/algorithm/metrics extraction
+    GROQ_EXTRACTION_MODEL: str = "openai/gpt-oss-120b"
+
     @field_validator("JWT_SECRET_KEY", "SESSION_SECRET_KEY")
     @classmethod
     def _warn_on_default_secret(cls, value: str) -> str:
