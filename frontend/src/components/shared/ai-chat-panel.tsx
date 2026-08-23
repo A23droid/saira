@@ -2,40 +2,46 @@
 
 import { useEffect, useRef, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Sparkles, ArrowUp, User } from "lucide-react";
+import { Sparkles, ArrowUp, User, AlertCircle } from "lucide-react";
 import { ChatMessage } from "@/lib/types";
 import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
-import { getPaperById } from "@/lib/mock-data";
-import Link from "next/link";
+import { askPaperQA, modelLabel } from "@/lib/api/ai";
 
-const mockReplies = [
-  "Based on the papers saved here, the strongest signal is a shift toward parameter-efficient adaptation rather than full retraining — worth foregrounding in your framing.",
-  "That's covered in the methodology section — the authors validate this with an ablation that isolates the effect from confounding hyperparameter changes.",
-  "A few papers in this collection touch on that, but none benchmark it directly. It could be a genuine gap worth flagging in your literature review.",
-  "Comparing the two, they agree on the core mechanism but differ in evaluation scale — one uses held-out benchmarks, the other reports only in-domain results.",
-];
-
+/**
+ * AI Chat Panel — wired to the SAIRA backend Q&A endpoint.
+ *
+ * When paperId is provided, questions are sent to POST /api/v1/ai/qa
+ * which routes them through the AI Router to Llama 3.3 70B via Groq.
+ *
+ * When paperId is not provided (e.g. project-level context), the panel
+ * shows a notice that paper context is required.
+ */
 export function AIChatPanel({
   initialMessages,
   contextLabel,
   placeholder = "Ask about the papers in this project…",
+  paperId,
 }: {
   initialMessages: ChatMessage[];
   contextLabel?: string;
   placeholder?: string;
+  /** The database UUID of the paper to ask about. Required for real AI Q&A. */
+  paperId?: string;
 }) {
   const [messages, setMessages] = useState<ChatMessage[]>(initialMessages);
   const [input, setInput] = useState("");
   const [thinking, setThinking] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [lastModel, setLastModel] = useState<string | undefined>(undefined);
   const scrollRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
   }, [messages, thinking]);
 
-  function handleSend() {
-    if (!input.trim()) return;
+  async function handleSend() {
+    if (!input.trim() || thinking) return;
+
     const userMsg: ChatMessage = {
       id: crypto.randomUUID(),
       role: "user",
@@ -45,18 +51,36 @@ export function AIChatPanel({
     setMessages((prev) => [...prev, userMsg]);
     setInput("");
     setThinking(true);
+    setError(null);
 
-    setTimeout(() => {
+    try {
+      if (!paperId) {
+        // No paper context — give a helpful notice instead of crashing
+        const reply: ChatMessage = {
+          id: crypto.randomUUID(),
+          role: "assistant",
+          content: "Please open a specific paper to ask questions about it. The AI Q&A feature requires a paper context.",
+          createdAt: new Date().toISOString(),
+        };
+        setMessages((prev) => [...prev, reply]);
+        return;
+      }
+
+      const result = await askPaperQA(paperId, userMsg.content);
+      setLastModel(result.model);
       const reply: ChatMessage = {
         id: crypto.randomUUID(),
         role: "assistant",
-        content: mockReplies[Math.floor(Math.random() * mockReplies.length)],
-        citedPaperIds: ["p1", "p4"].slice(0, Math.floor(Math.random() * 2) + 1),
+        content: result.answer,
         createdAt: new Date().toISOString(),
       };
       setMessages((prev) => [...prev, reply]);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "Failed to get an answer. Please try again.";
+      setError(msg);
+    } finally {
       setThinking(false);
-    }, 1100);
+    }
   }
 
   return (
@@ -69,9 +93,21 @@ export function AIChatPanel({
           <p className="text-sm font-medium text-ink">Ask SAIRA</p>
           {contextLabel && <p className="text-xs text-ink-faint">{contextLabel}</p>}
         </div>
+        {paperId && lastModel && (
+          <span className="ml-auto rounded-full bg-teal-50 px-2 py-0.5 text-[10px] font-medium text-teal-700">
+            {modelLabel(lastModel)}
+          </span>
+        )}
       </div>
 
       <div ref={scrollRef} className="thin-scroll flex-1 space-y-4 overflow-y-auto px-5 py-5">
+        {messages.length === 0 && (
+          <p className="text-center text-xs text-ink-faint">
+            {paperId
+              ? "Ask any question about this paper. SAIRA will answer using its metadata."
+              : "Open a paper to enable AI Q&A."}
+          </p>
+        )}
         {messages.map((m) => (
           <ChatBubble key={m.id} message={m} />
         ))}
@@ -86,10 +122,16 @@ export function AIChatPanel({
               <span className="flex h-6 w-6 items-center justify-center rounded-full bg-teal-50">
                 <Sparkles className="h-3 w-3 text-teal-600" />
               </span>
-              Reading the papers…
+              Thinking…
             </motion.div>
           )}
         </AnimatePresence>
+        {error && (
+          <div className="flex items-start gap-2 rounded-xl border border-red-200 bg-red-50 p-3">
+            <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-red-500" />
+            <p className="text-xs text-red-700">{error}</p>
+          </div>
+        )}
       </div>
 
       <div className="border-t border-line-soft p-3">
@@ -104,10 +146,11 @@ export function AIChatPanel({
               }
             }}
             rows={1}
-            placeholder={placeholder}
-            className="max-h-28 flex-1 resize-none bg-transparent px-2 py-1.5 text-sm text-ink placeholder:text-ink-faint focus:outline-none"
+            placeholder={paperId ? placeholder : "Open a paper to enable AI Q&A…"}
+            disabled={!paperId || thinking}
+            className="max-h-28 flex-1 resize-none bg-transparent px-2 py-1.5 text-sm text-ink placeholder:text-ink-faint focus:outline-none disabled:opacity-50"
           />
-          <Button size="icon" onClick={handleSend} disabled={!input.trim()}>
+          <Button size="icon" onClick={handleSend} disabled={!input.trim() || thinking || !paperId}>
             <ArrowUp className="h-4 w-4" />
           </Button>
         </div>
@@ -139,21 +182,6 @@ function ChatBubble({ message }: { message: ChatMessage }) {
         >
           {message.content}
         </div>
-        {message.citedPaperIds && message.citedPaperIds.length > 0 && (
-          <div className="mt-1.5 flex flex-wrap gap-1.5">
-            {message.citedPaperIds.map((id) => {
-              const paper = getPaperById(id);
-              if (!paper) return null;
-              return (
-                <Link key={id} href={`/papers/${id}`}>
-                  <Badge variant="outline" className="cursor-pointer hover:bg-paper-dim">
-                    {paper.title.length > 28 ? paper.title.slice(0, 28) + "…" : paper.title}
-                  </Badge>
-                </Link>
-              );
-            })}
-          </div>
-        )}
       </div>
     </motion.div>
   );
