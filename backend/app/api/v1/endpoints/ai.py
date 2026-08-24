@@ -29,8 +29,11 @@ from app.schemas.ai import (
     AIQARequest,
     AIQAResponse,
     AIStatusResponse,
+    PRDRequest,
+    PRDResponse,
 )
 from app.services.ai_router import ai_router
+from app.services.prd_engine import prd_engine
 from app.services.groq_service import GroqServiceError
 from app.services.paper_service import paper_service
 from app.core.config import settings
@@ -182,5 +185,35 @@ async def paper_qa(
 
     try:
         return await ai_router.answer_question(_paper_to_dict(paper), req.question)
+    except GroqServiceError as exc:
+        raise _handle_groq_error(exc)
+
+
+# ── Personalized Research Delta (PRD) ─────────────────────────────────────────
+
+@router.post("/prd", response_model=PRDResponse)
+async def calculate_prd(
+    req: PRDRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> PRDResponse:
+    """
+    Calculate the Personalized Research Delta (PRD) for a candidate paper 
+    against a user's specific project workspace.
+    """
+    try:
+        paper_id = uuid.UUID(req.paper_id)
+        project_id = uuid.UUID(req.project_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid UUID format.")
+
+    paper = await paper_service.get_paper_by_id(session=db, paper_id=paper_id)
+    if not paper:
+        raise HTTPException(status_code=404, detail="Candidate paper not found.")
+
+    try:
+        return await prd_engine.calculate_prd(session=db, project_id=project_id, paper=paper)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
     except GroqServiceError as exc:
         raise _handle_groq_error(exc)

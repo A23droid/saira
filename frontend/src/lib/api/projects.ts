@@ -21,6 +21,10 @@ export async function getProjectPapers(id: string): Promise<BackendPaper[]> {
   return apiFetch<BackendPaper[]>(`/projects/${id}/papers`);
 }
 
+export async function getProjectStats(id: string): Promise<{ total_papers: number, total_notes: number }> {
+  return apiFetch<{ total_papers: number, total_notes: number }>(`/projects/${id}/stats`);
+}
+
 export async function updateProject(id: string, data: Partial<Project>): Promise<Project> {
   return apiFetch<Project>(`/projects/${id}`, {
     method: "PATCH",

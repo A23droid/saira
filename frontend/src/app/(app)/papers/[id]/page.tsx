@@ -44,7 +44,7 @@ import {
 import { getPaperById, getPaperProjects, BackendPaper } from "@/lib/api/papers";
 import { getProjects, addPaperToProject, updateProjectPaper } from "@/lib/api/projects";
 import { getReadingData, createNote, deleteNote, createHighlight, deleteHighlight, updateReadingProgress, ProjectPaperReadingData } from "@/lib/api/reading_data";
-import { fetchPaperSummary, fetchPaperExtraction, AISummaryResponse, AIExtractionResponse, modelLabel } from "@/lib/api/ai";
+import { fetchPaperSummary, fetchPaperExtraction, calculatePRD, AISummaryResponse, AIExtractionResponse, PRDResponse, modelLabel } from "@/lib/api/ai";
 import { Project } from "@/lib/types";
 import { Loader2 } from "lucide-react";
 
@@ -75,6 +75,11 @@ export default function PaperDetailsPage({ params }: { params: Promise<{ id: str
   const [aiExtractionLoading, setAiExtractionLoading] = useState(false);
   const [aiExtractionError, setAiExtractionError] = useState<string | null>(null);
   const [aiExtractionLoaded, setAiExtractionLoaded] = useState(false);
+
+  const [prdLoading, setPrdLoading] = useState(false);
+  const [prdLoaded, setPrdLoaded] = useState(false);
+  const [prdData, setPrdData] = useState<PRDResponse | null>(null);
+  const [prdError, setPrdError] = useState<string | null>(null);
   
   // Fetch Paper & Projects it belongs to
   useEffect(() => {
@@ -354,6 +359,7 @@ export default function PaperDetailsPage({ params }: { params: Promise<{ id: str
               <TabsTrigger value="highlights">Highlights ({readingData?.highlights?.length || 0})</TabsTrigger>
               <TabsTrigger value="summary">AI summary</TabsTrigger>
               <TabsTrigger value="extracted">Extracted info</TabsTrigger>
+              <TabsTrigger value="prd">PRD (Delta)</TabsTrigger>
               <TabsTrigger value="related">Related work</TabsTrigger>
               <TabsTrigger value="graphs">Graphs</TabsTrigger>
             </TabsList>

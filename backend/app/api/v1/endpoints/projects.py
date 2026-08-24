@@ -2,7 +2,7 @@ import uuid
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -87,6 +87,30 @@ async def delete_project(
         raise HTTPException(status_code=404, detail="Project not found")
     await project_service.delete_project(session=db, db_project=project)
     return None
+
+
+@router.get("/{project_id}/stats", response_model=dict)
+async def get_project_stats(
+    project_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> Any:
+    # Ensure the user has access to the project
+    await project_service.get_project_by_id(session=db, project_id=project_id, user_id=current_user.id)
+    
+    # Get paper count
+    stmt = select(func.count()).select_from(ProjectPaper).where(ProjectPaper.project_id == project_id)
+    paper_count = await db.scalar(stmt)
+    
+    # Get note count
+    from app.models.note import Note
+    stmt2 = select(func.count()).select_from(Note).join(ProjectPaper).where(ProjectPaper.project_id == project_id)
+    note_count = await db.scalar(stmt2)
+    
+    return {
+        "total_papers": paper_count or 0,
+        "total_notes": note_count or 0,
+    }
 
 
 # ────────────────────────── Project Papers ──────────────────────────

@@ -45,6 +45,16 @@ export interface AIStatusResponse {
   message: string;
 }
 
+export interface PRDResponse {
+  prd_score: number;
+  semantic_delta: number;
+  method_delta: number;
+  dataset_delta: number;
+  gap_resolution: number;
+  explanation: string;
+  model?: string;
+}
+
 /**
  * Map an internal Groq model identifier to a human-readable display label.
  * Add entries here as new models are introduced — never hardcode labels in components.
@@ -107,5 +117,19 @@ export async function askPaperQA(
   return apiFetch<AIQAResponse>("/ai/qa", {
     method: "POST",
     body: JSON.stringify({ paper_id: paperId, question }),
+  });
+}
+
+/**
+ * Calculate the Personalized Research Delta (PRD) for a candidate paper 
+ * against a user's specific project workspace.
+ */
+export async function calculatePRD(
+  projectId: string,
+  paperId: string
+): Promise<PRDResponse> {
+  return apiFetch<PRDResponse>("/ai/prd", {
+    method: "POST",
+    body: JSON.stringify({ project_id: projectId, paper_id: paperId }),
   });
 }

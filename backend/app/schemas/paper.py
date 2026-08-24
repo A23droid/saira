@@ -41,4 +41,6 @@ class PaperResponse(PaperBase):
 
 class PaperSearchResponse(PaperBase):
     openalex_id: Optional[str] = None
+    local_id: Optional[str] = None
+    saved_project_ids: list[str] = []
 

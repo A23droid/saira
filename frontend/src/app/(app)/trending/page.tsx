@@ -38,13 +38,13 @@ export default function TrendingPage() {
                   })
                 }
               />
-              <p className="mt-2 flex items-center gap-1.5 pl-1 text-xs text-ink-faint">
+              <div className="mt-2 flex items-center gap-1.5 pl-1 text-xs text-ink-faint">
                 <Flame className="h-3 w-3 text-brass-600" />
                 {entry.reason}
                 <Badge variant="outline" className="ml-1 font-mono text-[10px]">
                   Trend score {entry.trendScore}
                 </Badge>
-              </p>
+              </div>
             </div>
           </div>
         ))}

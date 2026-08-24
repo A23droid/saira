@@ -6,5 +6,29 @@ from app.models.project_paper import ProjectPaper
 from app.models.note import Note
 from app.models.highlight import Highlight
 from app.models.reading_progress import ReadingProgress
+from app.models.paper_analysis import PaperAnalysis
+from app.models.collection import Collection
+from app.models.collection_paper import CollectionPaper
+from app.models.chat import ChatSession, ChatMessage
+from app.models.comparison import Comparison, ComparisonPaper
+from app.models.literature_review import LiteratureReview
 
-__all__ = ["AuthProvider", "RefreshToken", "User", "Project", "Paper", "ProjectPaper", "Note", "Highlight", "ReadingProgress"]
+__all__ = [
+    "AuthProvider",
+    "RefreshToken",
+    "User",
+    "Project",
+    "Paper",
+    "ProjectPaper",
+    "Note",
+    "Highlight",
+    "ReadingProgress",
+    "PaperAnalysis",
+    "Collection",
+    "CollectionPaper",
+    "ChatSession",
+    "ChatMessage",
+    "Comparison",
+    "ComparisonPaper",
+    "LiteratureReview"
+]

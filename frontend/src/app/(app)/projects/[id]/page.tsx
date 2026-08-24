@@ -49,10 +49,12 @@ import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { cn } from "@/lib/utils";
 
-import { Project, Paper } from "@/lib/types";
-import { getProjectById, getProjectPapers, updateProject, deleteProject, removePaperFromProject } from "@/lib/api/projects";
+import { Project } from "@/lib/types";
+import { BackendPaper } from "@/lib/api/papers";
+import { getProjectById, getProjectPapers, getProjectStats, updateProject, deleteProject, removePaperFromProject } from "@/lib/api/projects";
 // Mocks for non-MVP features
 import { chatMessages, notes as allNotes, getSavedArtifactsForProject } from "@/lib/mock-data";
+import { generateComparison, Comparison } from "@/lib/api/comparisons";
 
 const colorOptions = [
   { id: "teal", label: "Teal", className: "bg-teal-600" },
@@ -67,11 +69,14 @@ export default function ProjectDetailsPage({ params }: { params: Promise<{ id: s
   const initialTab = searchParams.get("tab") || "overview";
   
   const [project, setProject] = useState<Project | null>(null);
-  const [projectPapers, setProjectPapers] = useState<Paper[]>([]);
+  const [projectPapers, setProjectPapers] = useState<BackendPaper[]>([]);
+  const [stats, setStats] = useState<{total_papers: number, total_notes: number}>({ total_papers: 0, total_notes: 0 });
   const [loading, setLoading] = useState(true);
   const [notFound, setNotFound] = useState(false);
   
   const [compareSelection, setCompareSelection] = useState<string[]>([]);
+  const [isComparing, setIsComparing] = useState(false);
+  const [aiComparison, setAiComparison] = useState<Comparison | null>(null);
 
   const [isEditDialogOpen, setIsEditDialogOpen] = useState(false);
   const [editName, setEditName] = useState("");
@@ -84,22 +89,15 @@ export default function ProjectDetailsPage({ params }: { params: Promise<{ id: s
     
     Promise.all([
       getProjectById(id),
-      getProjectPapers(id)
+      getProjectPapers(id),
+      getProjectStats(id)
     ])
-    .then(([proj, papers]) => {
+    .then(([proj, papers, statsData]) => {
       if (active) {
         setProject(proj);
+        setStats(statsData);
         // Ensure UI mock mappings are handled for papers
-        setProjectPapers(papers.map((p: any) => ({
-          ...p,
-          year: p.publication_year || null,
-          citationCount: p.citation_count || 0,
-          authors: p.authors || [],
-          tags: p.tags || [],
-          readingStatus: "unread",
-          aiSummary: { tldr: "", keyFindings: [], methodology: "", limitations: [] },
-          extracted: { problem: "", dataset: [], method: "", metrics: [], codeAvailable: false }
-        })));
+        setProjectPapers(papers as any);
         setEditName(proj.name);
         setEditDescription(proj.description || "");
         setEditColor((proj.color as any) || "teal");
@@ -118,8 +116,7 @@ export default function ProjectDetailsPage({ params }: { params: Promise<{ id: s
   if (loading) return <div className="p-10 text-center text-ink-faint">Loading project...</div>;
   if (notFound || !project) return <div className="p-10 text-center text-red-500">Project not found.</div>;
 
-  // We haven't implemented project-scoped notes for this list view yet, so we'll mock the count to 0 for MVP
-  const projectNotesCount = 0; 
+  const projectNotesCount = stats.total_notes; 
   const selectedPapers = projectPapers.filter((p) => compareSelection.includes(p.id));
   const projectArtifacts = getSavedArtifactsForProject(project.id); // Stubbed
 
@@ -275,7 +272,21 @@ export default function ProjectDetailsPage({ params }: { params: Promise<{ id: s
             <div className="flex flex-col gap-3">
               {projectPapers.map((p) => (
                 <div key={p.id} className="relative group">
-                  <PaperCard paper={p} />
+                  <PaperCard paper={{
+                    id: p.id,
+                    title: p.title,
+                    abstract: p.abstract || "",
+                    year: p.publication_year || 0,
+                    venue: p.venue || "",
+                    citationCount: p.citation_count || 0,
+                    source: (p.source || "web") as any,
+                    authors: [],
+                    tags: [],
+                    savedToProjectIds: [],
+                    readingStatus: "unread",
+                    extracted: { problem: "", dataset: [], method: "", metrics: [], codeAvailable: false },
+                    aiSummary: { tldr: "", keyFindings: [], methodology: "", limitations: [] }
+                  }} />
                   <Button
                     variant="destructive"
                     size="icon"
@@ -300,10 +311,11 @@ export default function ProjectDetailsPage({ params }: { params: Promise<{ id: s
         </TabsContent>
 
         <TabsContent value="chat">
-          <div className="h-[560px]">
+          <div className="h-[600px] mt-6">
             <AIChatPanel
-              initialMessages={[]}
-              contextLabel={`Answering from ${projectPapers.length} papers in ${project.name}`}
+              projectId={project.id}
+              contextLabel={`Project: ${project.name}`}
+              placeholder="Ask about any paper in this project..."
             />
           </div>
         </TabsContent>
@@ -343,10 +355,40 @@ export default function ProjectDetailsPage({ params }: { params: Promise<{ id: s
                 ))}
               </div>
               {selectedPapers.length >= 2 ? (
-                <ComparePanel
-                  papers={selectedPapers}
-                  onRemove={(id) => setCompareSelection((prev) => prev.filter((p) => p !== id))}
-                />
+                <div className="flex flex-col gap-6 mt-6">
+                  
+                  <div className="border border-line rounded-2xl p-6 bg-surface">
+                    <div className="flex items-center justify-between mb-4">
+                      <h3 className="font-display text-lg font-medium text-ink">AI Synthesis</h3>
+                      <Button 
+                        onClick={async () => {
+                          setIsComparing(true);
+                          setAiComparison(null);
+                          try {
+                            const title = `Comparison of ${selectedPapers.length} papers`;
+                            const res = await generateComparison(title, selectedPapers.map(p => p.id), project.id);
+                            setAiComparison(res);
+                          } catch(e) {
+                            console.error(e);
+                          } finally {
+                            setIsComparing(false);
+                          }
+                        }}
+                        disabled={isComparing}
+                      >
+                        {isComparing ? "Analyzing..." : "Generate AI Comparison"}
+                      </Button>
+                    </div>
+                    
+                    {aiComparison && (
+                      <ComparePanel
+                        papers={selectedPapers}
+                        comparison={aiComparison}
+                        onRemove={(pid) => setCompareSelection(prev => prev.filter(x => x !== pid))}
+                      />
+                    )}
+                  </div>
+                </div>
               ) : (
                 <p className="text-sm text-ink-faint">Select at least two papers above to compare.</p>
               )}
@@ -355,7 +397,7 @@ export default function ProjectDetailsPage({ params }: { params: Promise<{ id: s
         </TabsContent>
 
         <TabsContent value="review">
-          <LiteratureReviewPanel papers={projectPapers} topic={project.name.toLowerCase()} />
+          <LiteratureReviewPanel projectId={project.id} paperCount={projectPapers.length} />
         </TabsContent>
 
         <TabsContent value="artifacts">

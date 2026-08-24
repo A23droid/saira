@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { motion } from "framer-motion";
-import { BookmarkPlus, Quote, FileCheck2, Flame, Star } from "lucide-react";
+import { BookmarkPlus, Quote, FileCheck2, Flame, Star, Layers } from "lucide-react";
 import { Paper } from "@/lib/types";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -23,15 +23,20 @@ export function PaperCard({
   disableLink = false,
   onFavorite,
   favorited,
+  onOpen,
+  onAddToCollection,
 }: {
   paper: Paper;
   onSave?: (paper: Paper) => void;
+  onAddToCollection?: (paper: Paper) => void;
   saved?: boolean;
   compact?: boolean;
   /** Optional trend callout, e.g. "+412 citations this week" — used on the Trending page. */
   trendLabel?: string;
   /** When true, the title is not a link (e.g. un-ingested search results that have no DB UUID). */
   disableLink?: boolean;
+  /** When provided, the title acts as a button triggering this callback. */
+  onOpen?: (paper: Paper) => void;
   onFavorite?: (paper: Paper) => void;
   favorited?: boolean;
 }) {
@@ -47,6 +52,12 @@ export function PaperCard({
             <h3 className="font-display text-[1.05rem] font-medium leading-snug text-ink min-w-0">
               {paper.title}
             </h3>
+          ) : onOpen ? (
+            <button onClick={() => onOpen(paper)} className="min-w-0 text-left cursor-pointer">
+              <h3 className="font-display text-[1.05rem] font-medium leading-snug text-ink group-hover:text-teal-700">
+                {paper.title}
+              </h3>
+            </button>
           ) : (
             <Link href={`/papers/${paper.id}`} className="min-w-0">
               <h3 className="font-display text-[1.05rem] font-medium leading-snug text-ink group-hover:text-teal-700">
@@ -102,6 +113,17 @@ export function PaperCard({
               >
                 <Star className={`h-3.5 w-3.5 ${favorited ? "fill-teal-600 text-teal-600" : "text-ink-faint"}`} />
                 {favorited ? "Favorited" : "Favorite"}
+              </Button>
+            )}
+            {onAddToCollection && (
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => onAddToCollection(paper)}
+                className="gap-1.5"
+              >
+                <Layers className="h-3.5 w-3.5" />
+                Add to Collection
               </Button>
             )}
             {onSave && (
