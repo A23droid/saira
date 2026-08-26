@@ -86,3 +86,15 @@ async def get_paper_projects(
     )
     result = await db.scalars(stmt)
     return list(result.all())
+
+
+@router.get("/{paper_id}/similar", response_model=list[PaperResponse])
+async def get_similar_papers(
+    paper_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> Any:
+    stmt = select(Paper).where(Paper.id != paper_id).limit(3)
+    result = await db.scalars(stmt)
+    return list(result.all())
+

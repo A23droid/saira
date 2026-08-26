@@ -1,6 +1,9 @@
 from fastapi import APIRouter
 
-from app.api.v1.endpoints import auth, oauth_google, oauth_orcid, projects, papers, search, ai, collections, chat, comparisons, project_ai
+from app.api.v1.endpoints import (
+    auth, oauth_google, oauth_orcid, projects, papers, search, ai, collections, chat, comparisons, project_ai,
+    history, analytics, trending
+)
 
 api_router = APIRouter()
 
@@ -15,3 +18,6 @@ api_router.include_router(collections.router, prefix="/collections", tags=["coll
 api_router.include_router(chat.router, prefix="/chat", tags=["chat"])
 api_router.include_router(comparisons.router, prefix="/comparisons", tags=["comparisons"])
 api_router.include_router(project_ai.router, prefix="/projects", tags=["project-ai"])
+api_router.include_router(history.router, prefix="/history", tags=["history"])
+api_router.include_router(analytics.router, prefix="/analytics", tags=["analytics"])
+api_router.include_router(trending.router, prefix="/trending", tags=["trending"])

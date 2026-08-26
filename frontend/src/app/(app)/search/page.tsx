@@ -19,9 +19,11 @@ import {
 } from "@/components/ui/dialog";
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from "@/components/ui/select";
 import { Project, Paper, PaperSource } from "@/lib/types";
+import toast from "react-hot-toast";
 import { getProjects, updateProjectPaper } from "@/lib/api/projects";
 import { searchPapersExternal, ingestPaper, OpenAlexSearchResult, SearchSource } from "@/lib/api/search";
 import { getCollections, addPaperToCollection, Collection } from "@/lib/api/collections";
+import { logHistoryEvent } from "@/lib/api/analytics";
 
 const availableSources: { value: SearchSource; label: string }[] = [
   { value: "all", label: "All sources" },
@@ -107,6 +109,14 @@ export default function SearchPapersPage() {
       .then((data) => {
         if (active) {
           setSearchResults(data.map(mapToUIPaper));
+          
+          if (page === 1) {
+            logHistoryEvent({
+              event_type: "search",
+              title: `Searched for "${submittedQuery}"`,
+              url: `/search?q=${encodeURIComponent(submittedQuery)}`,
+            }).catch(console.error);
+          }
         }
       })
       .catch(console.error)
@@ -148,7 +158,7 @@ export default function SearchPapersPage() {
       router.push(`/papers/${res.paper.id}`);
     } catch (e) {
       console.error(e);
-      alert("Failed to open paper");
+      toast.error("Failed to open paper");
     } finally {
       setIsOpening(false);
     }
@@ -173,10 +183,11 @@ export default function SearchPapersPage() {
         await updateProjectPaper(selectedProjectIdForSave, res.paper.id, { favorite: true });
       }
       setSavedIds((prev) => new Set(prev).add(pickerPaper.ui_id));
+      toast.success("Paper saved to your library");
       router.push(`/papers/${res.paper.id}`);
-    } catch (e) {
-      console.error(e);
-      alert("Failed to save paper");
+    } catch (err) {
+      console.error("Failed to save paper:", err);
+      toast.error("Failed to save paper");
     } finally {
       setIsSaving(false);
       setPickerPaper(null);
@@ -203,7 +214,7 @@ export default function SearchPapersPage() {
       setSelectedCollectionIdForSave(null);
     } catch (e) {
       console.error(e);
-      alert("Failed to add paper to collection");
+      toast.error("Failed to add paper to collection");
     } finally {
       setIsSaving(false);
     }

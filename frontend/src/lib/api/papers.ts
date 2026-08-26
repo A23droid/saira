@@ -34,3 +34,7 @@ export async function getPaperProjects(paperId: string): Promise<Project[]> {
 export async function deletePaper(id: string): Promise<void> {
   return apiFetch<void>(`/papers/${id}`, { method: "DELETE" });
 }
+
+export async function getSimilarPapers(paperId: string): Promise<BackendPaper[]> {
+  return apiFetch<BackendPaper[]>(`/papers/${paperId}/similar`);
+}

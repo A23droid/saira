@@ -8,6 +8,9 @@ import { ChatMessage } from "@/lib/types";
 import { Button } from "@/components/ui/button";
 import { getChatSessions, createChatSession, addChatMessage } from "@/lib/api/chat";
 import { projectChat, ChatCitation } from "@/lib/api/project_ai";
+import { createSavedArtifact } from "@/lib/api/projects";
+import { BookmarkPlus, Check } from "lucide-react";
+import toast from "react-hot-toast";
 
 /**
  * AI Chat Panel — supports both paper-scoped and project-scoped chat.
@@ -44,16 +47,31 @@ export function AIChatPanel({
   const isProjectMode = Boolean(projectId && !paperId);
   const hasSomeContext = Boolean(projectId || paperId);
 
-  // Auto-load existing paper-mode session (project mode creates sessions on-demand)
+  // Auto-load existing session (for both paper and project modes)
   useEffect(() => {
     async function initSession() {
-      if (!paperId) return;
+      if (!paperId && !projectId) return;
       try {
-        const sessions = await getChatSessions(undefined, paperId);
+        const sessions = await getChatSessions(projectId, paperId);
         if (sessions.length > 0) {
           setSessionId(sessions[0].id);
           if (sessions[0].messages) {
             setMessages(sessions[0].messages);
+            
+            // Reconstruct basic citations for previous assistant messages
+            const citationsMap: Record<string, ChatCitation[]> = {};
+            sessions[0].messages.forEach((msg) => {
+              const citedIds = msg.citedPaperIds || (msg as any).cited_paper_ids;
+              if (msg.role === "assistant" && citedIds && citedIds.length > 0) {
+                // We only have the IDs from the backend, so we create placeholder citations
+                citationsMap[msg.id] = citedIds.map((id: string) => ({
+                  paper_id: id,
+                  title: "Cited Paper",
+                  reason: "Cited in previous conversation"
+                }));
+              }
+            });
+            setMessageCitations(citationsMap);
           }
         }
       } catch (err) {
@@ -61,7 +79,7 @@ export function AIChatPanel({
       }
     }
     initSession();
-  }, [paperId]);
+  }, [paperId, projectId]);
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
@@ -166,6 +184,7 @@ export function AIChatPanel({
             key={m.id}
             message={m}
             citations={messageCitations[m.id]}
+            projectId={projectId}
           />
         ))}
         <AnimatePresence>
@@ -217,13 +236,36 @@ export function AIChatPanel({
   );
 }
 
-function ChatBubble({ message, citations }: { message: ChatMessage; citations?: ChatCitation[] }) {
+function ChatBubble({ message, citations, projectId }: { message: ChatMessage; citations?: ChatCitation[]; projectId?: string }) {
   const isUser = message.role === "user";
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+
+  const handleSave = async () => {
+    if (!projectId || saving || saved) return;
+    setSaving(true);
+    try {
+      await createSavedArtifact(projectId, {
+        type: "chat_answer",
+        title: message.content.slice(0, 40) + "...",
+        content: message.content,
+        citedPaperIds: citations?.map(c => c.paper_id) || []
+      });
+      setSaved(true);
+      toast.success("Saved to artifacts");
+    } catch (e) {
+      console.error("Failed to save artifact:", e);
+      toast.error("Failed to save artifact");
+    } finally {
+      setSaving(false);
+    }
+  };
+
   return (
     <motion.div
       initial={{ opacity: 0, y: 8 }}
       animate={{ opacity: 1, y: 0 }}
-      className={`flex gap-2.5 ${isUser ? "flex-row-reverse" : ""}`}
+      className={`group flex gap-2.5 ${isUser ? "flex-row-reverse" : ""}`}
     >
       <div
         className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-full ${
@@ -256,6 +298,21 @@ function ChatBubble({ message, citations }: { message: ChatMessage; citations?: 
                 <ExternalLink className="h-3 w-3 shrink-0 opacity-50" />
               </Link>
             ))}
+          </div>
+        )}
+        
+        {!isUser && projectId && (
+          <div className="mt-1 opacity-0 group-hover:opacity-100 transition-opacity">
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-6 text-[10px] text-ink-faint hover:text-teal-600 gap-1 px-2"
+              onClick={handleSave}
+              disabled={saving || saved}
+            >
+              {saved ? <Check className="h-3 w-3 text-green-600" /> : <BookmarkPlus className="h-3 w-3" />}
+              {saved ? "Saved to artifacts" : "Save to artifacts"}
+            </Button>
           </div>
         )}
       </div>

@@ -104,5 +104,14 @@ export async function getLitReview(
 }
 
 export async function deleteLitReview(projectId: string): Promise<void> {
-  await apiFetch(`/projects/${projectId}/ai/review`, { method: "DELETE" });
+  return apiFetch<void>(`/projects/${projectId}/ai/review`, {
+    method: "DELETE",
+  });
+}
+
+export async function generateIndependentReview(paperIds: string[]): Promise<LiteratureReviewContent> {
+  return apiFetch<LiteratureReviewContent>(`/ai/review`, {
+    method: "POST",
+    body: JSON.stringify({ paper_ids: paperIds }),
+  });
 }

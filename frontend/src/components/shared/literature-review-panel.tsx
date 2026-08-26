@@ -14,6 +14,9 @@ import {
   LitReviewTheme,
   LitReviewReference,
 } from "@/lib/api/project_ai";
+import { createSavedArtifact } from "@/lib/api/projects";
+import { BookmarkPlus } from "lucide-react";
+import toast from "react-hot-toast";
 
 // ── Section helpers ────────────────────────────────────────────────────────────
 
@@ -47,13 +50,48 @@ function BulletList({ items }: { items: string[] }) {
   );
 }
 
-function ThemeCard({ theme, idx }: { theme: LitReviewTheme; idx: number }) {
+function ThemeCard({ theme, idx, projectId }: { theme: LitReviewTheme; idx: number; projectId: string }) {
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+
+  const handleSave = async () => {
+    if (saving || saved) return;
+    setSaving(true);
+    try {
+      await createSavedArtifact(projectId, {
+        type: "review_snippet",
+        title: `Theme: ${theme.title}`,
+        content: theme.summary,
+        citedPaperIds: theme.paper_ids || []
+      });
+      setSaved(true);
+      toast.success("Saved to artifacts");
+    } catch (e) {
+      console.error(e);
+      toast.error("Failed to save artifact");
+    } finally {
+      setSaving(false);
+    }
+  };
+
   return (
-    <div className="rounded-xl border border-line bg-paper-dim/30 p-4">
+    <div className="group rounded-xl border border-line bg-paper-dim/30 p-4 relative">
+      <div className="absolute top-3 right-3 opacity-0 group-hover:opacity-100 transition-opacity">
+        <Button
+          variant="ghost"
+          size="sm"
+          className="h-6 text-[10px] text-ink-faint hover:text-teal-600 gap-1 px-2"
+          onClick={handleSave}
+          disabled={saving || saved}
+        >
+          {saved ? <Check className="h-3 w-3 text-green-600" /> : <BookmarkPlus className="h-3 w-3" />}
+          {saved ? "Saved" : "Save"}
+        </Button>
+      </div>
       <p className="mb-1.5 text-xs font-semibold uppercase tracking-wider text-teal-600">
         Theme {idx + 1}
       </p>
-      <h4 className="mb-2 font-display text-sm font-semibold text-ink">{theme.title}</h4>
+      <h4 className="mb-2 pr-12 font-display text-sm font-semibold text-ink">{theme.title}</h4>
       <p className="text-sm text-ink-soft leading-relaxed">{theme.summary}</p>
       {theme.paper_ids && theme.paper_ids.length > 0 && (
         <p className="mt-2 text-xs text-ink-faint">
@@ -335,7 +373,7 @@ export function LiteratureReviewPanel({
         {c.themes && c.themes.length > 0 && (
           <Section title="Themes">
             <div className="grid gap-3 sm:grid-cols-2">
-              {c.themes.map((t, i) => <ThemeCard key={i} theme={t} idx={i} />)}
+              {c.themes.map((t, i) => <ThemeCard key={i} theme={t} idx={i} projectId={projectId} />)}
             </div>
           </Section>
         )}

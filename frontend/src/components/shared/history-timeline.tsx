@@ -19,6 +19,7 @@ const iconByType: Record<HistoryEventType, LucideIcon> = {
   compare: GitCompareArrows,
   review_generated: BookMarked,
   note_added: NotebookPen,
+  view_page: FileText,
 };
 
 function formatTimestamp(iso: string) {
@@ -32,7 +33,7 @@ export function HistoryTimeline({ events }: { events: HistoryEvent[] }) {
   return (
     <div className="flex flex-col">
       {events.map((event, i) => {
-        const Icon = iconByType[event.type];
+        const Icon = iconByType[event.type as HistoryEventType] || FileText;
         const isLast = i === events.length - 1;
         const content = (
           <div className="flex gap-4">

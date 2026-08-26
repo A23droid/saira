@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from "react";
 import { GitCompareArrows, Loader2 } from "lucide-react";
+import toast from "react-hot-toast";
 import { PageHeader } from "@/components/shared/page-header";
 import { SearchBar } from "@/components/shared/search-bar";
 import { ComparePanel } from "@/components/shared/compare-panel";
@@ -48,7 +49,7 @@ export default function ComparePage() {
       setComparison(res);
     } catch (err) {
       console.error("Failed to generate comparison:", err);
-      alert("Failed to generate comparison. Please try again.");
+      toast.error("Failed to generate comparison. Please try again.");
     } finally {
       setGenerating(false);
     }

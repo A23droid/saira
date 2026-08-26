@@ -60,6 +60,9 @@ class ProjectChatRequest(BaseModel):
     message: str
     session_id: Optional[str] = None  # pass to continue existing conversation
 
+class IndependentReviewRequest(BaseModel):
+    paper_ids: list[str]
+
 
 # ── Citation Schema ────────────────────────────────────────────────────────────
 

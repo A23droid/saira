@@ -142,3 +142,24 @@ export interface RelatedPaperLink {
   relation: "supports" | "contradicts";
   note: string;
 }
+
+export interface ReadingProgress {
+  id: string;
+  project_paper_id: string;
+  progress_percent: number;
+  last_page?: number | null;
+  started_at?: string | null;
+  last_opened?: string | null;
+  completed_at?: string | null;
+}
+
+export interface ProjectPaperReadingData {
+  project_paper_id: string;
+  status?: string | null;
+  favorite: boolean;
+  priority?: number | null;
+  added_at: string;
+  notes: any[];
+  highlights: any[];
+  reading_progress?: ReadingProgress | null;
+}

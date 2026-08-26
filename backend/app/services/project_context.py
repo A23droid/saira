@@ -99,7 +99,7 @@ class ProjectContextBuilder:
             "favorite": pp.favorite,
             "summary_tldr": paper.analysis.summary_tldr if paper.analysis else None,
             "notes": [n.content for n in (pp.notes or [])],
-            "highlights": [h.content for h in (pp.highlights or [])],
+            "highlights": [h.selected_text + (f" (Note: {h.ai_note})" if getattr(h, "ai_note", None) else "") for h in (pp.highlights or [])],
         }
 
     async def build_context(self, session, project_id, user_id=None) -> str:
@@ -126,7 +126,7 @@ class ProjectContextBuilder:
                 for n in (pp.notes or []):
                     lines.append(f"User Note: {n.content}")
                 for h in (pp.highlights or []):
-                    lines.append(f"Highlight: {h.content}")
+                    lines.append(f"Highlight: {h.selected_text}" + (f" (Note: {h.ai_note})" if getattr(h, "ai_note", None) else ""))
         return "\n".join(lines)
 
     async def build_retrieval_context(self, session, project_id, user_id, query: str, top_k: int = 5):

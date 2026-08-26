@@ -12,6 +12,8 @@ from app.models.collection_paper import CollectionPaper
 from app.models.chat import ChatSession, ChatMessage
 from app.models.comparison import Comparison, ComparisonPaper
 from app.models.literature_review import LiteratureReview
+from app.models.saved_artifact import SavedArtifact
+from app.models.user_history import UserHistory
 
 __all__ = [
     "AuthProvider",
@@ -30,5 +32,7 @@ __all__ = [
     "ChatMessage",
     "Comparison",
     "ComparisonPaper",
-    "LiteratureReview"
+    "LiteratureReview",
+    "SavedArtifact",
+    "UserHistory"
 ]

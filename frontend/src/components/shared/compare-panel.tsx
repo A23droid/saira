@@ -2,19 +2,48 @@
 
 import { X } from "lucide-react";
 import { BackendPaper } from "@/lib/api/papers";
-import { Comparison } from "@/lib/api/comparisons";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
+import { BookmarkPlus, Check } from "lucide-react";
+import { useState } from "react";
+import { createSavedArtifact } from "@/lib/api/projects";
+import toast from "react-hot-toast";
 
 export function ComparePanel({
   papers,
   comparison,
   onRemove,
+  projectId,
 }: {
   papers: BackendPaper[];
   comparison: Comparison;
   onRemove?: (id: string) => void;
+  projectId?: string;
 }) {
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+
+  const handleSave = async () => {
+    if (!projectId || saving || saved) return;
+    setSaving(true);
+    try {
+      await createSavedArtifact(projectId, {
+        type: "review_snippet",
+        title: `Comparison Takeaway: ${comparison.content.dimensions.map(d => d.name).slice(0,2).join(", ")}`,
+        content: comparison.content.research_takeaway,
+        citedPaperIds: comparison.paper_ids
+      });
+      setSaved(true);
+      toast.success("Saved to artifacts");
+    } catch (e) {
+      console.error(e);
+      toast.error("Failed to save artifact");
+    } finally {
+      setSaving(false);
+    }
+  };
+
   if (papers.length === 0 || !comparison) return null;
 
   // The generated comparison papers might be ordered differently than the selected papers.
@@ -113,9 +142,23 @@ export function ComparePanel({
         </Card>
       </div>
       
-      <Card className="border-teal-100 bg-teal-50/30 shadow-none">
-        <CardHeader className="p-4 pb-2">
+      <Card className="border-teal-100 bg-teal-50/30 shadow-none relative group">
+        <CardHeader className="p-4 pb-2 flex flex-row items-center justify-between">
           <CardTitle className="text-sm font-medium uppercase tracking-wide text-teal-800">Research Takeaway</CardTitle>
+          {projectId && (
+            <div className="opacity-0 group-hover:opacity-100 transition-opacity">
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-6 text-[10px] text-teal-800 hover:text-teal-900 gap-1 px-2"
+                onClick={handleSave}
+                disabled={saving || saved}
+              >
+                {saved ? <Check className="h-3 w-3 text-green-600" /> : <BookmarkPlus className="h-3 w-3" />}
+                {saved ? "Saved" : "Save to artifacts"}
+              </Button>
+            </div>
+          )}
         </CardHeader>
         <CardContent className="p-4 pt-0">
           <p className="text-sm leading-relaxed text-teal-900">{comparison.content.research_takeaway}</p>

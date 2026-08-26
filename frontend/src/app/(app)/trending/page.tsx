@@ -1,16 +1,27 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { Flame } from "lucide-react";
 import { PageHeader } from "@/components/shared/page-header";
 import { PaperCard } from "@/components/shared/paper-card";
-import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { getTrendingPapers } from "@/lib/mock-data";
+import { getTrendingPapers, TrendingPaper } from "@/lib/api/analytics";
+import { logHistoryEvent } from "@/lib/api/analytics";
 
 export default function TrendingPage() {
-  const trending = getTrendingPapers();
+  const [trending, setTrending] = useState<TrendingPaper[]>([]);
   const [savedIds, setSavedIds] = useState<Set<string>>(new Set());
+
+  useEffect(() => {
+    getTrendingPapers().then(setTrending).catch(console.error);
+    
+    // Log view event
+    logHistoryEvent({
+      event_type: "view_page",
+      title: "Viewed Trending Papers",
+      url: "/trending"
+    }).catch(console.error);
+  }, []);
 
   return (
     <div>
@@ -27,7 +38,21 @@ export default function TrendingPage() {
             </span>
             <div className="flex-1">
               <PaperCard
-                paper={paper}
+                paper={{
+                  id: paper.id,
+                  title: paper.title,
+                  abstract: paper.abstract || "",
+                  year: paper.publication_year || 0,
+                  venue: paper.venue || "",
+                  citationCount: paper.citation_count || 0,
+                  source: (paper.source || "web") as any,
+                  authors: [],
+                  tags: [],
+                  savedToProjectIds: [],
+                  readingStatus: "unread",
+                  extracted: { problem: "", dataset: [], method: "", metrics: [], codeAvailable: false },
+                  aiSummary: { tldr: "", keyFindings: [], methodology: "", limitations: [] }
+                }}
                 trendLabel={`+${entry.weeklyCitationDelta} this week`}
                 saved={savedIds.has(paper.id)}
                 onSave={() =>
