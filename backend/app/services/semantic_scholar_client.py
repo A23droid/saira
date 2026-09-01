@@ -98,4 +98,36 @@ class SemanticScholarClient:
         raise ValueError(f"Semantic Scholar paper not found or rate limited: {paper_id}")
 
 
+    async def get_similar_works(self, paper_id: str, limit: int = 20) -> List[Dict[str, Any]]:
+        """
+        Fetch recommended/similar papers from Semantic Scholar.
+        Supports native S2 paperId or external IDs like 'ARXIV:1706.03762' or 'DOI:10.1038/...'
+        """
+        params = {
+            "fields": S2_FIELDS,
+            "limit": min(limit, 500)
+        }
+        for attempt in range(3):
+            async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as client:
+                response = await client.get(
+                    f"https://api.semanticscholar.org/recommendations/v1/papers/forpaper/{paper_id}",
+                    params=params,
+                    headers=self.headers,
+                )
+                if response.status_code == 404:
+                    return [] # Not found or no recommendations
+                if response.status_code == 429:
+                    await asyncio.sleep(2 ** attempt)
+                    continue
+                
+                try:
+                    response.raise_for_status()
+                    data = response.json()
+                    papers = data.get("recommendedPapers", [])
+                    return [_normalize_s2(p) for p in papers if p.get("title")]
+                except Exception as e:
+                    return []
+                    
+        return []
+
 semantic_scholar_client = SemanticScholarClient()

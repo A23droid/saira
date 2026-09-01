@@ -77,20 +77,8 @@ async def get_analytics(
     papers_read_by_month[-1].count = weekly_added
 
     # 8. Topic Breakdown
-    # Get all tags from all papers
-    stmt_tags = select(Paper.tags).join(ProjectPaper).where(
-        ProjectPaper.project.has(user_id=current_user.id)
-    )
-    tags_result = await db.scalars(stmt_tags)
-    tag_counts = {}
-    for tag_list in tags_result:
-        for tag in tag_list:
-            tag_counts[tag] = tag_counts.get(tag, 0) + 1
-            
-    sorted_tags = sorted(tag_counts.items(), key=lambda x: x[1], reverse=True)[:5]
-    topic_breakdown = [TopicCount(tag=t[0], count=t[1]) for t in sorted_tags]
-    if not topic_breakdown:
-        topic_breakdown = [TopicCount(tag="Machine Learning", count=1)] # Fallback
+    # (Mocked for now since Paper.tags is not yet implemented in DB)
+    topic_breakdown = [TopicCount(tag="Machine Learning", count=1)]
     
     return AnalyticsResponse(
         totalPapersSaved=total_papers,

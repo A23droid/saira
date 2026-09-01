@@ -137,3 +137,18 @@ async def revoke_refresh_token(db: AsyncSession, raw_token: str) -> None:
         .values(revoked=True)
     )
     await db.commit()
+
+
+async def change_password(db: AsyncSession, user: User, current_password: str | None, new_password: str) -> None:
+    """Update a user's password.
+    
+    If the user already has a password, verify the current_password matches.
+    If the user has no password (e.g. OAuth only), allow setting one directly.
+    """
+    if user.password_hash is not None:
+        if not current_password or not verify_password(current_password, user.password_hash):
+            raise InvalidCredentialsError("Incorrect current password.")
+            
+    user.password_hash = hash_password(new_password)
+    db.add(user)
+    await db.commit()

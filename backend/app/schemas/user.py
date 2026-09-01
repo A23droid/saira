@@ -16,6 +16,7 @@ class UserRead(BaseModel):
     avatar_url: str | None
     is_active: bool
     created_at: datetime
+    has_password: bool
 
 
 class UserUpdateRequest(BaseModel):
@@ -25,3 +26,8 @@ class UserUpdateRequest(BaseModel):
     facts about the account, not preferences."""
 
     name: str = Field(min_length=1, max_length=255)
+
+
+class PasswordChangeRequest(BaseModel):
+    current_password: str | None = None
+    new_password: str = Field(min_length=8)

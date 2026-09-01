@@ -8,7 +8,7 @@ from app.exceptions import NotAuthenticatedError
 from app.models.user import User
 from app.schemas.auth import LoginRequest, RegisterRequest
 from app.schemas.token import Message
-from app.schemas.user import UserRead, UserUpdateRequest
+from app.schemas.user import PasswordChangeRequest, UserRead, UserUpdateRequest
 from app.services import user_service
 from app.services.auth_service import (
     register_user,
@@ -16,6 +16,7 @@ from app.services.auth_service import (
     issue_token_pair,
     rotate_refresh_token,
     revoke_refresh_token,
+    change_password,
 )
 from app.services.avatar_service import save_avatar
 
@@ -128,3 +129,14 @@ async def upload_avatar(
     """
     avatar_url = await save_avatar(current_user.id, file)
     return await user_service.set_user_avatar_url(db, current_user, avatar_url)
+
+
+@router.patch("/me/password", response_model=Message)
+async def update_password(
+    payload: PasswordChangeRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> Message:
+    """Update the current user's password."""
+    await change_password(db, current_user, payload.current_password, payload.new_password)
+    return Message(detail="Password updated successfully.")

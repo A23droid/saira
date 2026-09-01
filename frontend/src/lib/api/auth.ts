@@ -8,6 +8,7 @@ export interface AuthUser {
   avatar_url: string | null;
   is_active: boolean;
   created_at: string;
+  has_password: boolean;
 }
 
 export function registerRequest(name: string, email: string, password: string) {
@@ -36,6 +37,13 @@ export function updateProfileRequest(name: string) {
   return apiFetch<AuthUser>("/auth/me", {
     method: "PATCH",
     body: JSON.stringify({ name }),
+  });
+}
+
+export function updatePasswordRequest(currentPassword: string | undefined, newPassword: string) {
+  return apiFetch<{ detail: string }>("/auth/me/password", {
+    method: "PATCH",
+    body: JSON.stringify({ current_password: currentPassword || null, new_password: newPassword }),
   });
 }
 

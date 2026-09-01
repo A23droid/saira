@@ -78,7 +78,7 @@ export function PaperCard({
         </div>
 
         <p className="truncate text-sm text-ink-soft">
-          {paper.authors.map((a) => a.name).join(", ")} &middot; {paper.venue}
+          {paper.authors?.map((a) => a.name).join(", ") || "Unknown authors"} &middot; {paper.venue}
         </p>
 
         {!compact && (
@@ -86,7 +86,7 @@ export function PaperCard({
         )}
 
         <div className="flex flex-wrap items-center gap-1.5 pt-1">
-          {paper.tags.slice(0, 3).map((tag) => (
+          {(paper.tags || []).slice(0, 3).map((tag) => (
             <Badge key={tag} variant="secondary">
               {tag}
             </Badge>
@@ -96,12 +96,17 @@ export function PaperCard({
         <div className="mt-1 flex items-center justify-between border-t border-line-soft pt-3">
           <div className="flex items-center gap-4 text-xs text-ink-faint">
             <span className="flex items-center gap-1">
-              <Quote className="h-3.5 w-3.5" /> {paper.citationCount.toLocaleString()}
+              <Quote className="h-3.5 w-3.5" /> {(paper.citationCount ?? 0).toLocaleString()}
             </span>
             <span className="flex items-center gap-1">
               <FileCheck2 className="h-3.5 w-3.5" /> {statusCopy[paper.readingStatus]}
             </span>
             <span className="hidden font-mono sm:inline">{paper.source}</span>
+            {paper.pdfUrl && (
+              <span className="flex items-center gap-1 text-teal-700 font-medium">
+                <FileCheck2 className="h-3.5 w-3.5" /> PDF
+              </span>
+            )}
           </div>
           <div className="flex items-center gap-2">
             {onFavorite && (

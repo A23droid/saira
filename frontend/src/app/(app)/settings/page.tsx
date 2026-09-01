@@ -1,7 +1,7 @@
 "use client";
 
 import { useRef, useState } from "react";
-import { User, Bell, Palette, Plug, KeyRound, Trash2, Loader2, Check } from "lucide-react";
+import { User, Bell, Plug, KeyRound, Trash2, Loader2, Check } from "lucide-react";
 import { PageHeader } from "@/components/shared/page-header";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -13,11 +13,11 @@ import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { useAuth } from "@/contexts/auth-context";
 import { ApiError } from "@/lib/api/client";
+import { updatePasswordRequest } from "@/lib/api/auth";
 
 const sections = [
   { id: "profile", label: "Profile", icon: User },
   { id: "notifications", label: "Notifications", icon: Bell },
-  { id: "appearance", label: "Appearance", icon: Palette },
   { id: "integrations", label: "Integrations", icon: Plug },
   { id: "security", label: "Security", icon: KeyRound },
 ];
@@ -34,7 +34,8 @@ const ALLOWED_AVATAR_TYPES = ["image/jpeg", "image/png", "image/webp"];
 export default function SettingsPage() {
   const [active, setActive] = useState("profile");
   const [notifs, setNotifs] = useState({ digest: true, mentions: true, product: false });
-  const { user, updateProfile, uploadAvatar } = useAuth();
+  const [integrations, setIntegrations] = useState({ zotero: true, slack: false, notion: false });
+  const { user, updateProfile, uploadAvatar, refreshUser } = useAuth();
 
   const [name, setName] = useState(user?.name ?? "");
   const [savingName, setSavingName] = useState(false);
@@ -44,6 +45,13 @@ export default function SettingsPage() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [uploading, setUploading] = useState(false);
   const [avatarError, setAvatarError] = useState<string | null>(null);
+
+  // Password state
+  const [currentPassword, setCurrentPassword] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [passwordUpdating, setPasswordUpdating] = useState(false);
+  const [passwordError, setPasswordError] = useState<string | null>(null);
+  const [passwordSuccess, setPasswordSuccess] = useState(false);
 
   if (!user) return null;
 
@@ -68,7 +76,7 @@ export default function SettingsPage() {
 
   async function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
-    e.target.value = ""; // allow re-selecting the same file later
+    e.target.value = "";
     if (!file) return;
 
     setAvatarError(null);
@@ -91,6 +99,32 @@ export default function SettingsPage() {
       setUploading(false);
     }
   }
+
+  async function handleUpdatePassword() {
+    if (!newPassword.trim()) return;
+    
+    setPasswordError(null);
+    setPasswordSuccess(false);
+    setPasswordUpdating(true);
+    try {
+      await updatePasswordRequest(user?.hasPassword ? currentPassword : undefined, newPassword);
+      setPasswordSuccess(true);
+      setCurrentPassword("");
+      setNewPassword("");
+      await refreshUser(); // refresh user so hasPassword becomes true if it wasn't
+      setTimeout(() => setPasswordSuccess(false), 3000);
+    } catch (err) {
+      setPasswordError(err instanceof ApiError ? err.message : "Couldn't update password.");
+    } finally {
+      setPasswordUpdating(false);
+    }
+  }
+
+  const integrationList = [
+    { id: "zotero", name: "Zotero", desc: "Sync saved papers to a Zotero library.", connected: integrations.zotero },
+    { id: "slack", name: "Slack", desc: "Post project updates to a channel.", connected: integrations.slack },
+    { id: "notion", name: "Notion", desc: "Export literature reviews as Notion pages.", connected: integrations.notion },
+  ] as const;
 
   return (
     <div>
@@ -204,45 +238,20 @@ export default function SettingsPage() {
             </Card>
           )}
 
-          {active === "appearance" && (
-            <Card className="p-6">
-              <p className="mb-4 text-sm font-medium text-ink">Theme</p>
-              <div className="grid grid-cols-3 gap-3">
-                {["Paper (default)", "Dim", "System"].map((theme, i) => (
-                  <button
-                    key={theme}
-                    className={`rounded-xl border-2 p-4 text-left text-sm ${
-                      i === 0 ? "border-teal-600" : "border-line"
-                    }`}
-                  >
-                    <div className="mb-3 h-10 w-full rounded-lg bg-paper-dim" />
-                    {theme}
-                  </button>
-                ))}
-              </div>
-              <p className="mt-4 text-xs text-ink-faint">
-                Additional themes are on the roadmap — SAIRA currently uses the warm paper theme
-                throughout.
-              </p>
-            </Card>
-          )}
-
           {active === "integrations" && (
             <Card className="divide-y divide-line-soft p-0">
-              {[
-                { name: "Zotero", desc: "Sync saved papers to a Zotero library.", connected: true },
-                { name: "Slack", desc: "Post project updates to a channel.", connected: false },
-                { name: "Notion", desc: "Export literature reviews as Notion pages.", connected: false },
-              ].map((integration) => (
+              {integrationList.map((integration) => (
                 <div key={integration.name} className="flex items-center justify-between gap-4 p-5">
                   <div>
                     <p className="font-medium text-ink">{integration.name}</p>
                     <p className="text-sm text-ink-soft">{integration.desc}</p>
                   </div>
                   {integration.connected ? (
-                    <Badge variant="secondary">Connected</Badge>
+                    <Button variant="secondary" size="sm" onClick={() => setIntegrations(prev => ({...prev, [integration.id]: false}))}>
+                      Disconnect
+                    </Button>
                   ) : (
-                    <Button variant="outline" size="sm">
+                    <Button variant="outline" size="sm" onClick={() => setIntegrations(prev => ({...prev, [integration.id]: true}))}>
                       Connect
                     </Button>
                   )}
@@ -256,17 +265,29 @@ export default function SettingsPage() {
               <Card className="p-6">
                 <p className="mb-4 text-sm font-medium text-ink">Change password</p>
                 <div className="grid gap-4 sm:grid-cols-2">
-                  <div className="flex flex-col gap-1.5">
-                    <Label htmlFor="current-pw">Current password</Label>
-                    <Input id="current-pw" type="password" placeholder="••••••••" />
-                  </div>
+                  {user.hasPassword && (
+                    <div className="flex flex-col gap-1.5">
+                      <Label htmlFor="current-pw">Current password</Label>
+                      <Input id="current-pw" type="password" placeholder="••••••••" value={currentPassword} onChange={e => setCurrentPassword(e.target.value)} />
+                    </div>
+                  )}
                   <div className="flex flex-col gap-1.5">
                     <Label htmlFor="new-pw">New password</Label>
-                    <Input id="new-pw" type="password" placeholder="••••••••" />
+                    <Input id="new-pw" type="password" placeholder="••••••••" value={newPassword} onChange={e => setNewPassword(e.target.value)} />
                   </div>
                 </div>
-                <div className="mt-5 flex justify-end">
-                  <Button>Update password</Button>
+                
+                {passwordError && <p className="mt-4 text-sm text-danger">{passwordError}</p>}
+                
+                <div className="mt-5 flex items-center justify-end gap-3">
+                  {passwordSuccess && (
+                    <p className="flex items-center gap-1 text-sm text-teal-700">
+                      <Check className="h-3.5 w-3.5" /> Password updated
+                    </p>
+                  )}
+                  <Button onClick={handleUpdatePassword} disabled={passwordUpdating || !newPassword.trim() || (user.hasPassword && !currentPassword.trim())}>
+                    {passwordUpdating ? "Updating..." : (user.hasPassword ? "Update password" : "Set password")}
+                  </Button>
                 </div>
               </Card>
 

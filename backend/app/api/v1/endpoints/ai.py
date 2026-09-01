@@ -155,6 +155,12 @@ async def extract_paper_info(
     if not paper:
         raise HTTPException(status_code=404, detail="Paper not found.")
 
+    if not paper.pdf_url:
+        raise HTTPException(
+            status_code=400,
+            detail="PDF unavailable: Cannot perform deep analysis without the full text document."
+        )
+
     try:
         return await ai_router.extract(_paper_to_dict(paper))
     except GroqServiceError as exc:
@@ -184,6 +190,12 @@ async def paper_qa(
     paper = await paper_service.get_paper_by_id(session=db, paper_id=paper_id)
     if not paper:
         raise HTTPException(status_code=404, detail="Paper not found.")
+
+    if not paper.pdf_url:
+        raise HTTPException(
+            status_code=400,
+            detail="PDF unavailable: Cannot perform deep analysis without the full text document."
+        )
 
     try:
         return await ai_router.answer_question(_paper_to_dict(paper), req.question)

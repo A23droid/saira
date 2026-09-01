@@ -79,5 +79,9 @@ class User(Base):
         back_populates="user", cascade="all, delete-orphan"
     )
 
+    @property
+    def has_password(self) -> bool:
+        return self.password_hash is not None
+
     def __repr__(self) -> str:  # pragma: no cover - debugging aid only
         return f"<User id={self.id} email={self.email!r} provider={self.provider!r}>"

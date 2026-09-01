@@ -55,6 +55,8 @@ export default function PaperDetailsPage({ params }: { params: Promise<{ id: str
   const [allProjects, setAllProjects] = useState<Project[]>([]);
   
   const [similarPapers, setSimilarPapers] = useState<BackendPaper[]>([]);
+  const [similarPapersLoading, setSimilarPapersLoading] = useState(true);
+  const [similarPapersError, setSimilarPapersError] = useState(false);
   
   const [selectedProjectId, setSelectedProjectId] = useState<string>("");
   const [readingData, setReadingData] = useState<ProjectPaperReadingData | null>(null);
@@ -90,14 +92,12 @@ export default function PaperDetailsPage({ params }: { params: Promise<{ id: str
       getPaperById(id),
       getPaperProjects(id),
       getProjects(),
-      getSimilarPapers(id).catch(() => []),
     ])
-    .then(([p, pProjs, allProjs, similar]) => {
+    .then(([p, pProjs, allProjs]) => {
       if (active) {
         setPaper(p);
         setPaperProjects(pProjs);
         setAllProjects(allProjs);
-        setSimilarPapers(similar as BackendPaper[]);
         
         if (pProjs.length > 0) {
           setSelectedProjectId(pProjs[0].id);
@@ -108,6 +108,29 @@ export default function PaperDetailsPage({ params }: { params: Promise<{ id: str
       console.error(err);
     });
     
+    return () => { active = false; };
+  }, [id]);
+
+  useEffect(() => {
+    let active = true;
+    setSimilarPapersLoading(true);
+    setSimilarPapersError(false);
+    
+    getSimilarPapers(id)
+      .then((similar) => {
+        if (active) {
+          setSimilarPapers(similar as BackendPaper[]);
+          setSimilarPapersLoading(false);
+        }
+      })
+      .catch((err) => {
+        console.error("Failed to fetch similar papers:", err);
+        if (active) {
+          setSimilarPapersError(true);
+          setSimilarPapersLoading(false);
+        }
+      });
+      
     return () => { active = false; };
   }, [id]);
 
@@ -648,8 +671,30 @@ export default function PaperDetailsPage({ params }: { params: Promise<{ id: str
               <h3 className="font-medium text-ink">Similar papers</h3>
             </div>
             <div className="flex flex-col gap-2">
-              {similarPapers.length === 0 ? (
-                <p className="text-sm text-ink-faint">No similar papers found.</p>
+              {similarPapersLoading ? (
+                <div className="flex items-center gap-2 text-sm text-ink-faint py-4">
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                  Finding similar papers...
+                </div>
+              ) : similarPapersError ? (
+                <div className="flex flex-col gap-2 py-4 text-sm">
+                  <p className="text-red-600">Similar papers are temporarily unavailable.</p>
+                  <Button variant="outline" size="sm" className="w-fit" onClick={() => {
+                    setSimilarPapersLoading(true);
+                    setSimilarPapersError(false);
+                    getSimilarPapers(id)
+                      .then((similar) => {
+                        setSimilarPapers(similar as BackendPaper[]);
+                        setSimilarPapersLoading(false);
+                      })
+                      .catch((err) => {
+                        setSimilarPapersError(true);
+                        setSimilarPapersLoading(false);
+                      });
+                  }}>Retry</Button>
+                </div>
+              ) : similarPapers.length === 0 ? (
+                <p className="text-sm text-ink-faint py-4">No similar papers found.</p>
               ) : (
                 similarPapers.map((sp) => (
                   <Link key={sp.id} href={`/papers/${sp.id}`} className="flex flex-col gap-1 p-3 rounded-xl border border-line bg-surface hover:border-teal-500 hover:bg-teal-50/40 transition-colors">

@@ -21,6 +21,7 @@ export interface SessionUser {
   avatarUrl: string | null;
   avatarInitial: string;
   createdAt: string;
+  hasPassword: boolean;
 }
 
 interface AuthContextValue {
@@ -45,6 +46,7 @@ function toSessionUser(user: AuthUser): SessionUser {
     avatarUrl: user.avatar_url,
     avatarInitial: user.name.trim().charAt(0).toUpperCase() || "?",
     createdAt: user.created_at,
+    hasPassword: user.has_password,
   };
 }
 

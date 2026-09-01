@@ -1,6 +1,7 @@
 import asyncio
 import re
 import uuid
+import logging
 from typing import Any, Dict, List, Literal, Optional
 
 from sqlalchemy import select, or_
@@ -13,9 +14,13 @@ from app.schemas.paper import PaperCreate
 from app.services.openalex_client import openalex_client
 from app.services.arxiv_client import arxiv_client
 from app.services.semantic_scholar_client import semantic_scholar_client
+from app.services.pdf_validator import pdf_validator
+
+logger = logging.getLogger(__name__)
 
 SearchSource = Literal["openalex", "arxiv", "semantic_scholar", "all"]
-
+MAX_CANDIDATE_PAGES = 5
+CONCURRENCY_LIMIT = 10
 
 def _clean_pdf_url(url: Optional[str]) -> Optional[str]:
     """Ensure the URL is likely a PDF and not a generic landing page."""
@@ -23,16 +28,12 @@ def _clean_pdf_url(url: Optional[str]) -> Optional[str]:
         return None
     
     url_lower = url.lower()
-    # If it ends with .pdf or contains /pdf/, it's likely a PDF
     if url_lower.endswith(".pdf") or "/pdf/" in url_lower:
         return url
         
-    # If it's a known publisher landing page (e.g., Semantic Scholar, arXiv abs), it's not a direct PDF
     if "semanticscholar.org/paper/" in url_lower or "arxiv.org/abs/" in url_lower:
         return None
         
-    # Many OpenAlex oa_url values are just HTML pages (e.g. PMC articles, publisher HTML)
-    # We will accept them if they contain 'pdf' or 'pmc/articles' (often PMC provides a PDF or iframe-able HTML).
     if "pdf" in url_lower or "pmc/articles" in url_lower:
         return url
         
@@ -42,7 +43,7 @@ class SearchService:
 
     # ── Normalizers ──────────────────────────────────────────────────────────
 
-    def _normalize_openalex(self, work: Dict[str, Any]) -> PaperCreate:
+    def _normalize_openalex(self, work: Dict[str, Any]) -> Dict[str, Any]:
         doi = work.get("doi")
         if doi and doi.startswith("https://doi.org/"):
             doi = doi.replace("https://doi.org/", "")
@@ -57,13 +58,15 @@ class SearchService:
         if primary_loc.get("source"):
             venue = primary_loc["source"].get("display_name")
 
-        pdf_url = None
+        candidate_urls = []
         if primary_loc.get("pdf_url"):
-            pdf_url = primary_loc["pdf_url"]
-        elif work.get("open_access", {}).get("oa_url"):
-            pdf_url = work["open_access"]["oa_url"]
+            candidate_urls.append(primary_loc["pdf_url"])
+        if work.get("open_access", {}).get("oa_url"):
+            candidate_urls.append(work["open_access"]["oa_url"])
+        if primary_loc.get("landing_page_url"):
+            candidate_urls.append(primary_loc["landing_page_url"])
             
-        pdf_url = _clean_pdf_url(pdf_url)
+        candidate_urls = [u for u in candidate_urls if u]
 
         abstract = ""
         inv_index = work.get("abstract_inverted_index")
@@ -79,7 +82,6 @@ class SearchService:
         else:
             abstract = work.get("description", "")
 
-        # Source label derived from metadata
         source = "OpenAlex"
         ids = work.get("ids", {})
         if arxiv_id or "arxiv" in ids:
@@ -95,37 +97,111 @@ class SearchService:
             elif "acl anthology" in venue_lower or "association for computational linguistics" in venue_lower:
                 source = "ACL Anthology"
 
-        return PaperCreate(
-            doi=doi,
-            arxiv_id=arxiv_id,
-            semantic_scholar_id=None,
-            title=work.get("title") or "Untitled",
-            abstract=abstract,
-            publication_year=work.get("publication_year"),
-            venue=venue,
-            pdf_url=pdf_url,
-            source=source,
-            citation_count=work.get("cited_by_count"),
-            reference_count=len(work.get("referenced_works", [])),
-        )
+        return {
+            "doi": doi,
+            "arxiv_id": arxiv_id,
+            "semantic_scholar_id": None,
+            "title": work.get("title") or "Untitled",
+            "abstract": abstract,
+            "publication_year": work.get("publication_year"),
+            "venue": venue,
+            "candidate_urls": candidate_urls,
+            "pdf_url": None,
+            "source": source,
+            "citation_count": work.get("cited_by_count"),
+            "reference_count": len(work.get("referenced_works", [])),
+        }
 
-    def _normalize_dict(self, raw: Dict[str, Any]) -> PaperCreate:
-        """Convert a pre-normalized dict (from arXiv/S2 clients) to PaperCreate."""
-        return PaperCreate(
-            doi=raw.get("doi"),
-            arxiv_id=raw.get("arxiv_id"),
-            semantic_scholar_id=raw.get("semantic_scholar_id"),
-            title=raw.get("title") or "Untitled",
-            abstract=raw.get("abstract") or "",
-            publication_year=raw.get("publication_year"),
-            venue=raw.get("venue"),
-            pdf_url=_clean_pdf_url(raw.get("pdf_url")),
-            source=raw.get("source") or "Unknown",
-            citation_count=raw.get("citation_count"),
-            reference_count=raw.get("reference_count"),
-        )
+    def _normalize_dict(self, raw: Dict[str, Any]) -> Dict[str, Any]:
+        """Convert a pre-normalized dict (from arXiv/S2 clients) to intermediate dict."""
+        candidate_urls = []
+        if raw.get("pdf_url"):
+            candidate_urls.append(raw.get("pdf_url"))
+            
+        if raw.get("arxiv_id"):
+            candidate_urls.append(f"https://arxiv.org/pdf/{raw.get('arxiv_id')}.pdf")
+            
+        return {
+            "doi": raw.get("doi"),
+            "arxiv_id": raw.get("arxiv_id"),
+            "semantic_scholar_id": raw.get("semantic_scholar_id"),
+            "title": raw.get("title") or "Untitled",
+            "abstract": raw.get("abstract") or "",
+            "publication_year": raw.get("publication_year"),
+            "venue": raw.get("venue"),
+            "candidate_urls": candidate_urls,
+            "pdf_url": None,
+            "source": raw.get("source") or "Unknown",
+            "citation_count": raw.get("citation_count"),
+            "reference_count": raw.get("reference_count"),
+        }
 
     # ── Search ───────────────────────────────────────────────────────────────
+
+    async def _validate_paper_candidates(self, paper: dict, semaphore: asyncio.Semaphore) -> Optional[dict]:
+        """Validates a single paper's candidate PDFs. Returns the paper with pdf_url set if valid, else None."""
+        if not _is_valid_paper(paper):
+            return None
+
+        async with semaphore:
+            valid_pdf = await pdf_validator.find_valid_pdf(paper.get("candidate_urls", []))
+            if valid_pdf:
+                paper["pdf_url"] = valid_pdf
+                # Remove candidate_urls to match expected PaperCreate shape
+                paper.pop("candidate_urls", None)
+                return paper
+            else:
+                logger.info(f"Paper '{paper.get('title')}' filtered out: No valid PDF candidates.")
+                return None
+
+    async def _run_provider_search(self, provider_name: str, query: str, limit: int, start_page: int) -> List[dict]:
+        """Fetches from a single provider until `limit` valid papers are found or max pages hit."""
+        valid_results = []
+        current_page = start_page
+        pages_fetched = 0
+        semaphore = asyncio.Semaphore(CONCURRENCY_LIMIT)
+
+        while len(valid_results) < limit and pages_fetched < MAX_CANDIDATE_PAGES:
+            pages_fetched += 1
+            works = []
+            if provider_name == "openalex":
+                works = await openalex_client.search_works(query, limit, current_page)
+            elif provider_name == "arxiv":
+                works = await arxiv_client.search_works(query, limit, current_page)
+            elif provider_name == "semantic_scholar":
+                works = await semantic_scholar_client.search_works(query, limit, current_page)
+                
+            if not works:
+                break
+
+            candidates = []
+            for work in works:
+                if provider_name == "openalex" and not (work.get("title") and work.get("id")):
+                    continue
+                    
+                if provider_name == "openalex":
+                    d = self._normalize_openalex(work)
+                    d["openalex_id"] = work.get("id").split("/")[-1]
+                else:
+                    d = self._normalize_dict(work)
+                    d["openalex_id"] = None
+                    
+                d["provider"] = provider_name
+                candidates.append(d)
+
+            # Parallel validation
+            tasks = [self._validate_paper_candidates(c, semaphore) for c in candidates]
+            validated = await asyncio.gather(*tasks)
+            
+            for v in validated:
+                if v is not None:
+                    valid_results.append(v)
+                    if len(valid_results) >= limit:
+                        break
+                        
+            current_page += 1
+
+        return valid_results
 
     async def search_papers_external(
         self,
@@ -136,62 +212,25 @@ class SearchService:
         source: SearchSource = "openalex",
     ) -> List[dict]:
         """
-        Search one or all sources in parallel, validate results, and deduplicate.
+        Search one or all sources in parallel, validate PDFs, and deduplicate.
         """
         results: List[dict] = []
 
-        async def _run_openalex() -> List[dict]:
-            out = []
-            works = await openalex_client.search_works(query, limit, page)
-            for work in works:
-                if work.get("title") and work.get("id"):
-                    normalized = self._normalize_openalex(work)
-                    d = normalized.model_dump()
-                    d["openalex_id"] = work.get("id").split("/")[-1]
-                    d["provider"] = "openalex"
-                    if _is_valid_paper(d):
-                        out.append(d)
-            return out
-
-        async def _run_arxiv() -> List[dict]:
-            out = []
-            works = await arxiv_client.search_works(query, limit, page)
-            for work in works:
-                normalized = self._normalize_dict(work)
-                d = normalized.model_dump()
-                d["openalex_id"] = None
-                d["provider"] = "arxiv"
-                if _is_valid_paper(d):
-                    out.append(d)
-            return out
-
-        async def _run_s2() -> List[dict]:
-            out = []
-            works = await semantic_scholar_client.search_works(query, limit, page)
-            for work in works:
-                normalized = self._normalize_dict(work)
-                d = normalized.model_dump()
-                d["openalex_id"] = None
-                d["provider"] = "semantic_scholar"
-                if _is_valid_paper(d):
-                    out.append(d)
-            return out
-
-        if source == "openalex":
-            results = await _run_openalex()
-        elif source == "arxiv":
-            results = await _run_arxiv()
-        elif source == "semantic_scholar":
-            results = await _run_s2()
-        elif source == "all":
+        if source == "all":
             # Fan out in parallel
-            tasks = [_run_openalex(), _run_arxiv(), _run_s2()]
+            tasks = [
+                self._run_provider_search("openalex", query, limit, page),
+                self._run_provider_search("arxiv", query, limit, page),
+                self._run_provider_search("semantic_scholar", query, limit, page)
+            ]
             parallel_results = await asyncio.gather(*tasks, return_exceptions=True)
             for res in parallel_results:
                 if isinstance(res, list):
                     results.extend(res)
             
             results = _deduplicate(results)
+        else:
+            results = await self._run_provider_search(source, query, limit, page)
 
         # Apply limit after validation and deduplication
         results = results[:limit]
@@ -220,6 +259,146 @@ class SearchService:
 
         return results
 
+    async def get_similar_papers(self, session: AsyncSession, paper: Paper, limit: int = 5) -> List[Paper]:
+        """
+        Orchestrates similar papers lookup with fallbacks, PDF validation, and pagination.
+        Saves valid candidates to the database so they can be viewed.
+        """
+        valid_results = []
+        candidates = []
+        semaphore = asyncio.Semaphore(CONCURRENCY_LIMIT)
+
+        # 1. Semantic Scholar Fallback Chain
+        s2_identifier = None
+        if paper.semantic_scholar_id:
+            s2_identifier = paper.semantic_scholar_id
+        elif paper.arxiv_id:
+            clean_arxiv = paper.arxiv_id.split("/")[-1]
+            s2_identifier = f"ARXIV:{clean_arxiv}"
+        elif paper.doi:
+            s2_identifier = f"DOI:{paper.doi}"
+            
+        logger.info(f"Finding similar papers for Paper ID: {paper.id}")
+
+        if not s2_identifier and paper.title:
+            try:
+                s2_search = await semantic_scholar_client.search_works(paper.title, limit=1)
+                if s2_search and s2_search[0].get("semantic_scholar_id"):
+                    s2_identifier = s2_search[0]["semantic_scholar_id"]
+                    logger.info(f"Resolved S2 ID from title: {s2_identifier}")
+            except Exception as e:
+                logger.error(f"Failed to resolve S2 ID by title: {e}")
+
+        if s2_identifier:
+            try:
+                works = await semantic_scholar_client.get_similar_works(s2_identifier, limit=limit*3)
+                if works:
+                    logger.info(f"Semantic Scholar lookup: success (found {len(works)})")
+                    for work in works:
+                        d = self._normalize_dict(work)
+                        d["provider"] = "semantic_scholar"
+                        candidates.append(d)
+                else:
+                    logger.info("Semantic Scholar lookup: zero results")
+            except Exception as e:
+                logger.error(f"Semantic Scholar lookup: failed ({e})")
+
+        # 2. OpenAlex Fallback
+        if not candidates:
+            oa_identifier = None
+            if paper.doi:
+                oa_identifier = f"https://doi.org/{paper.doi}"
+            elif paper.title:
+                try:
+                    oa_search = await openalex_client.search_works(paper.title, limit=1)
+                    if oa_search and oa_search[0].get("id"):
+                        oa_identifier = oa_search[0]["id"].split("/")[-1]
+                        logger.info(f"Resolved OpenAlex ID from title: {oa_identifier}")
+                except Exception as e:
+                    logger.error(f"Failed to resolve OpenAlex ID by title: {e}")
+
+            if oa_identifier:
+                try:
+                    works = await openalex_client.get_similar_works(oa_identifier, limit=limit*3)
+                    if works:
+                        logger.info(f"OpenAlex fallback: success (found {len(works)})")
+                        for work in works:
+                            if work.get("title") and work.get("id"):
+                                d = self._normalize_openalex(work)
+                                d["provider"] = "openalex"
+                                candidates.append(d)
+                    else:
+                        logger.info("OpenAlex fallback: zero results")
+                except Exception as e:
+                    logger.error(f"OpenAlex fallback: failed ({e})")
+        
+        # Deduplicate candidates and remove the current paper
+        deduped = []
+        seen = set()
+        
+        # Avoid recommending the source paper itself
+        if paper.doi: seen.add(paper.doi)
+        if paper.arxiv_id: seen.add(paper.arxiv_id)
+        if paper.semantic_scholar_id: seen.add(paper.semantic_scholar_id)
+        
+        for c in candidates:
+            # Check identifiers
+            is_dup = False
+            for key in ["doi", "arxiv_id", "semantic_scholar_id"]:
+                val = c.get(key)
+                if val:
+                    if val in seen:
+                        is_dup = True
+                        break
+                    
+            norm_title = _normalize_title(c.get("title", ""))
+            if norm_title == _normalize_title(paper.title):
+                is_dup = True
+                
+            if not is_dup:
+                deduped.append(c)
+                for key in ["doi", "arxiv_id", "semantic_scholar_id"]:
+                    val = c.get(key)
+                    if val:
+                        seen.add(val)
+        
+        # Validate PDFs concurrently
+        logger.info(f"Final candidates: {len(deduped)}")
+        tasks = [self._validate_paper_candidates(c, semaphore) for c in deduped]
+        validated = await asyncio.gather(*tasks)
+        
+        db_papers = []
+        for v in validated:
+            if v is not None:
+                # Save to DB if not exists
+                conditions = []
+                if v.get("doi"): conditions.append(Paper.doi == v["doi"])
+                if v.get("arxiv_id"): conditions.append(Paper.arxiv_id == v["arxiv_id"])
+                if v.get("semantic_scholar_id"): conditions.append(Paper.semantic_scholar_id == v["semantic_scholar_id"])
+                if v.get("title"): conditions.append(Paper.title.ilike(v["title"]))
+                
+                db_paper = None
+                if conditions:
+                    stmt = select(Paper).where(or_(*conditions))
+                    db_paper = await session.scalar(stmt)
+                    
+                if not db_paper:
+                    v.pop("provider", None)
+                    v.pop("openalex_id", None)
+                    v.pop("local_id", None)
+                    v.pop("saved_project_ids", None)
+                    db_paper = Paper(**v)
+                    session.add(db_paper)
+                    await session.commit()
+                    await session.refresh(db_paper)
+                
+                db_papers.append(db_paper)
+                if len(db_papers) >= limit:
+                    break
+
+        logger.info(f"Final valid papers: {len(db_papers)}")
+        return db_papers
+
     # ── Ingestion ─────────────────────────────────────────────────────────────
 
     async def ingest_paper(
@@ -237,15 +416,22 @@ class SearchService:
         """
         if openalex_id:
             work = await openalex_client.get_work_by_id(openalex_id)
-            normalized = self._normalize_openalex(work)
+            normalized_dict = self._normalize_openalex(work)
         elif arxiv_id:
             work = await arxiv_client.get_work_by_id(arxiv_id)
-            normalized = self._normalize_dict(work)
+            normalized_dict = self._normalize_dict(work)
         elif semantic_scholar_id:
             work = await semantic_scholar_client.get_work_by_id(semantic_scholar_id)
-            normalized = self._normalize_dict(work)
+            normalized_dict = self._normalize_dict(work)
         else:
             raise ValueError("One of openalex_id, arxiv_id, or semantic_scholar_id must be provided")
+
+        # Validate PDF before ingestion
+        valid_pdf = await pdf_validator.find_valid_pdf(normalized_dict.get("candidate_urls", []))
+        normalized_dict["pdf_url"] = valid_pdf
+        normalized_dict.pop("candidate_urls", None)
+        
+        normalized = PaperCreate(**normalized_dict)
 
         # Deduplication: DOI → arXiv ID → Semantic Scholar ID → Title
         db_paper = None
@@ -264,6 +450,11 @@ class SearchService:
             db_paper = await session.scalar(stmt)
 
         if not db_paper:
+            # If no valid PDF and not in DB, we should arguably reject ingestion from external source,
+            # but user requirement says: "Before ingesting an externally discovered paper, ensure its PDF source has been validated... This prevents invalid papers from entering the system".
+            if not valid_pdf:
+                raise ValueError("Cannot ingest paper: No accessible PDF source found.")
+            
             db_paper = Paper(**normalized.model_dump())
             session.add(db_paper)
             await session.commit()
@@ -291,7 +482,6 @@ def _normalize_title(title: str) -> str:
     """Normalize title for fuzzy deduplication."""
     if not title:
         return ""
-    # lower case, remove non-alphanumeric, strip spaces
     return re.sub(r'[^a-z0-9]', '', title.lower())
 
 def _deduplicate(results: List[dict]) -> List[dict]:
@@ -302,9 +492,6 @@ def _deduplicate(results: List[dict]) -> List[dict]:
     seen_titles: set = set()
     out = []
     
-    # Sort results to prefer OpenAlex (usually richer metadata) if available
-    # Since we can't guarantee order easily from gather, we just process as they come, 
-    # but could sort by source preference.
     for r in results:
         doi = r.get("doi")
         aid = r.get("arxiv_id")
@@ -338,7 +525,6 @@ def _deduplicate(results: List[dict]) -> List[dict]:
 def _is_valid_paper(paper: dict) -> bool:
     """
     Validate that the paper has sufficient authoritative metadata and content.
-    Validation is provider-aware.
     """
     provider = paper.get("provider")
     title = paper.get("title")
@@ -349,7 +535,6 @@ def _is_valid_paper(paper: dict) -> bool:
     if provider == "openalex":
         if not paper.get("openalex_id"):
             return False
-        # Require title and meaningful abstract for scholarly works
         if not paper.get("abstract") or len(paper.get("abstract").strip()) < 50:
             return False
 
@@ -363,13 +548,11 @@ def _is_valid_paper(paper: dict) -> bool:
         if not paper.get("semantic_scholar_id"):
             return False
 
-    # Check for valid year if present
     year = paper.get("publication_year")
     if year and (year < 1800 or year > 2100):
         return False
         
     return True
-
 
 
 search_service = SearchService()

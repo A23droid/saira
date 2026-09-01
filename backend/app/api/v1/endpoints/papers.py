@@ -94,7 +94,12 @@ async def get_similar_papers(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> Any:
-    stmt = select(Paper).where(Paper.id != paper_id).limit(3)
-    result = await db.scalars(stmt)
-    return list(result.all())
+    paper = await paper_service.get_paper_by_id(session=db, paper_id=paper_id)
+    if not paper:
+        raise HTTPException(status_code=404, detail="Paper not found")
+
+    from app.services.search_service import search_service
+    similar = await search_service.get_similar_papers(db, paper, limit=5)
+
+    return similar
 
