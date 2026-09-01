@@ -1,16 +1,15 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useMemo, useState, useEffect } from "react";
 import { History as HistoryIcon } from "lucide-react";
 import { PageHeader } from "@/components/shared/page-header";
 import { HistoryTimeline } from "@/components/shared/history-timeline";
 import { EmptyState } from "@/components/shared/empty-state";
 import { Card } from "@/components/ui/card";
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from "@/components/ui/select";
-import { historyEvents } from "@/lib/mock-data";
-import { HistoryEventType } from "@/lib/types";
+import { getHistory, HistoryEvent, logHistoryEvent } from "@/lib/api/analytics";
 
-const typeLabels: Record<HistoryEventType | "all", string> = {
+const typeLabels: Record<string, string> = {
   all: "All activity",
   search: "Searches",
   view_paper: "Papers viewed",
@@ -23,12 +22,23 @@ const typeLabels: Record<HistoryEventType | "all", string> = {
 
 export default function HistoryPage() {
   const [filter, setFilter] = useState<string>("all");
+  const [historyEvents, setHistoryEvents] = useState<HistoryEvent[]>([]);
+  
+  useEffect(() => {
+    getHistory().then(setHistoryEvents).catch(console.error);
+    
+    logHistoryEvent({
+      event_type: "view_page",
+      title: "Viewed History",
+      url: "/history"
+    }).catch(console.error);
+  }, []);
 
   const filtered = useMemo(() => {
     const sorted = [...historyEvents].sort((a, b) => (a.timestamp < b.timestamp ? 1 : -1));
     if (filter === "all") return sorted;
     return sorted.filter((e) => e.type === filter);
-  }, [filter]);
+  }, [filter, historyEvents]);
 
   return (
     <div className="mx-auto max-w-2xl">

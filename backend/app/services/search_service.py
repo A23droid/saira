@@ -1,7 +1,10 @@
+import asyncio
+import re
 import uuid
 from typing import Any, Dict, List, Literal, Optional
 
 from sqlalchemy import select, or_
+from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.paper import Paper
@@ -13,6 +16,27 @@ from app.services.semantic_scholar_client import semantic_scholar_client
 
 SearchSource = Literal["openalex", "arxiv", "semantic_scholar", "all"]
 
+
+def _clean_pdf_url(url: Optional[str]) -> Optional[str]:
+    """Ensure the URL is likely a PDF and not a generic landing page."""
+    if not url:
+        return None
+    
+    url_lower = url.lower()
+    # If it ends with .pdf or contains /pdf/, it's likely a PDF
+    if url_lower.endswith(".pdf") or "/pdf/" in url_lower:
+        return url
+        
+    # If it's a known publisher landing page (e.g., Semantic Scholar, arXiv abs), it's not a direct PDF
+    if "semanticscholar.org/paper/" in url_lower or "arxiv.org/abs/" in url_lower:
+        return None
+        
+    # Many OpenAlex oa_url values are just HTML pages (e.g. PMC articles, publisher HTML)
+    # We will accept them if they contain 'pdf' or 'pmc/articles' (often PMC provides a PDF or iframe-able HTML).
+    if "pdf" in url_lower or "pmc/articles" in url_lower:
+        return url
+        
+    return None
 
 class SearchService:
 
@@ -38,6 +62,8 @@ class SearchService:
             pdf_url = primary_loc["pdf_url"]
         elif work.get("open_access", {}).get("oa_url"):
             pdf_url = work["open_access"]["oa_url"]
+            
+        pdf_url = _clean_pdf_url(pdf_url)
 
         abstract = ""
         inv_index = work.get("abstract_inverted_index")
@@ -93,7 +119,7 @@ class SearchService:
             abstract=raw.get("abstract") or "",
             publication_year=raw.get("publication_year"),
             venue=raw.get("venue"),
-            pdf_url=raw.get("pdf_url"),
+            pdf_url=_clean_pdf_url(raw.get("pdf_url")),
             source=raw.get("source") or "Unknown",
             citation_count=raw.get("citation_count"),
             reference_count=raw.get("reference_count"),
@@ -103,66 +129,96 @@ class SearchService:
 
     async def search_papers_external(
         self,
+        session: AsyncSession,
         query: str,
         limit: int = 20,
         page: int = 1,
         source: SearchSource = "openalex",
     ) -> List[dict]:
         """
-        Search one or all sources. Each result includes an `openalex_id`
-        (for OpenAlex results) or appropriate ID fields for routing ingestion.
+        Search one or all sources in parallel, validate results, and deduplicate.
         """
         results: List[dict] = []
 
-        async def _run_openalex() -> None:
+        async def _run_openalex() -> List[dict]:
+            out = []
             works = await openalex_client.search_works(query, limit, page)
             for work in works:
-                if work.get("title"):
+                if work.get("title") and work.get("id"):
                     normalized = self._normalize_openalex(work)
                     d = normalized.model_dump()
-                    d["openalex_id"] = work.get("id", "").split("/")[-1] if work.get("id") else None
-                    results.append(d)
+                    d["openalex_id"] = work.get("id").split("/")[-1]
+                    d["provider"] = "openalex"
+                    if _is_valid_paper(d):
+                        out.append(d)
+            return out
 
-        async def _run_arxiv() -> None:
-            works = await arxiv_client.search_works(query, limit)
-            for work in works:
-                normalized = self._normalize_dict(work)
-                d = normalized.model_dump()
-                d["openalex_id"] = None  # no OpenAlex ID for direct arXiv results
-                results.append(d)
-
-        async def _run_s2() -> None:
-            works = await semantic_scholar_client.search_works(query, limit)
+        async def _run_arxiv() -> List[dict]:
+            out = []
+            works = await arxiv_client.search_works(query, limit, page)
             for work in works:
                 normalized = self._normalize_dict(work)
                 d = normalized.model_dump()
                 d["openalex_id"] = None
-                results.append(d)
+                d["provider"] = "arxiv"
+                if _is_valid_paper(d):
+                    out.append(d)
+            return out
+
+        async def _run_s2() -> List[dict]:
+            out = []
+            works = await semantic_scholar_client.search_works(query, limit, page)
+            for work in works:
+                normalized = self._normalize_dict(work)
+                d = normalized.model_dump()
+                d["openalex_id"] = None
+                d["provider"] = "semantic_scholar"
+                if _is_valid_paper(d):
+                    out.append(d)
+            return out
 
         if source == "openalex":
-            await _run_openalex()
+            results = await _run_openalex()
         elif source == "arxiv":
-            await _run_arxiv()
+            results = await _run_arxiv()
         elif source == "semantic_scholar":
-            await _run_s2()
+            results = await _run_s2()
         elif source == "all":
-            # Fan out — collect all, deduplicate by DOI then arXiv ID
-            per_source = limit // 3 or 10
-            try:
-                await _run_openalex()
-            except Exception:
-                pass
-            try:
-                await _run_arxiv()
-            except Exception:
-                pass
-            try:
-                await _run_s2()
-            except Exception:
-                pass
+            # Fan out in parallel
+            tasks = [_run_openalex(), _run_arxiv(), _run_s2()]
+            parallel_results = await asyncio.gather(*tasks, return_exceptions=True)
+            for res in parallel_results:
+                if isinstance(res, list):
+                    results.extend(res)
+            
             results = _deduplicate(results)
 
-        return results[:limit]
+        # Apply limit after validation and deduplication
+        results = results[:limit]
+        
+        # Check local DB for matches to populate local_id and saved_project_ids
+        for r in results:
+            r["local_id"] = None
+            r["saved_project_ids"] = []
+            
+            conditions = []
+            if r.get("doi"):
+                conditions.append(Paper.doi == r["doi"])
+            if r.get("arxiv_id"):
+                conditions.append(Paper.arxiv_id == r["arxiv_id"])
+            if r.get("semantic_scholar_id"):
+                conditions.append(Paper.semantic_scholar_id == r["semantic_scholar_id"])
+            if r.get("title"):
+                conditions.append(Paper.title.ilike(r["title"]))
+                
+            if conditions:
+                stmt = select(Paper).options(selectinload(Paper.project_papers)).where(or_(*conditions))
+                db_paper = await session.scalar(stmt)
+                if db_paper:
+                    r["local_id"] = str(db_paper.id)
+                    r["saved_project_ids"] = [str(pp.project_id) for pp in db_paper.project_papers]
+
+        return results
 
     # ── Ingestion ─────────────────────────────────────────────────────────────
 
@@ -191,7 +247,7 @@ class SearchService:
         else:
             raise ValueError("One of openalex_id, arxiv_id, or semantic_scholar_id must be provided")
 
-        # Deduplication: DOI → arXiv ID → Semantic Scholar ID
+        # Deduplication: DOI → arXiv ID → Semantic Scholar ID → Title
         db_paper = None
         conditions = []
         if normalized.doi:
@@ -200,6 +256,8 @@ class SearchService:
             conditions.append(Paper.arxiv_id == normalized.arxiv_id)
         if normalized.semantic_scholar_id:
             conditions.append(Paper.semantic_scholar_id == normalized.semantic_scholar_id)
+        if normalized.title:
+            conditions.append(Paper.title.ilike(normalized.title))
 
         if conditions:
             stmt = select(Paper).where(or_(*conditions))
@@ -229,22 +287,40 @@ class SearchService:
         return {"paper": db_paper, "project_paper": project_paper}
 
 
+def _normalize_title(title: str) -> str:
+    """Normalize title for fuzzy deduplication."""
+    if not title:
+        return ""
+    # lower case, remove non-alphanumeric, strip spaces
+    return re.sub(r'[^a-z0-9]', '', title.lower())
+
 def _deduplicate(results: List[dict]) -> List[dict]:
-    """Remove duplicate papers across sources by DOI or arXiv ID."""
+    """Remove duplicate papers across sources by IDs or normalized title + year."""
     seen_dois: set = set()
     seen_arxiv: set = set()
     seen_s2: set = set()
+    seen_titles: set = set()
     out = []
+    
+    # Sort results to prefer OpenAlex (usually richer metadata) if available
+    # Since we can't guarantee order easily from gather, we just process as they come, 
+    # but could sort by source preference.
     for r in results:
         doi = r.get("doi")
         aid = r.get("arxiv_id")
         sid = r.get("semantic_scholar_id")
+        
+        norm_title = _normalize_title(r.get("title", ""))
+        year = r.get("publication_year")
+        title_key = f"{norm_title}_{year}" if norm_title and year else None
 
         if doi and doi in seen_dois:
             continue
         if aid and aid in seen_arxiv:
             continue
         if sid and sid in seen_s2:
+            continue
+        if title_key and title_key in seen_titles:
             continue
 
         if doi:
@@ -253,8 +329,47 @@ def _deduplicate(results: List[dict]) -> List[dict]:
             seen_arxiv.add(aid)
         if sid:
             seen_s2.add(sid)
+        if title_key:
+            seen_titles.add(title_key)
+            
         out.append(r)
     return out
+
+def _is_valid_paper(paper: dict) -> bool:
+    """
+    Validate that the paper has sufficient authoritative metadata and content.
+    Validation is provider-aware.
+    """
+    provider = paper.get("provider")
+    title = paper.get("title")
+    
+    if not title or len(title.strip()) < 3:
+        return False
+
+    if provider == "openalex":
+        if not paper.get("openalex_id"):
+            return False
+        # Require title and meaningful abstract for scholarly works
+        if not paper.get("abstract") or len(paper.get("abstract").strip()) < 50:
+            return False
+
+    elif provider == "arxiv":
+        if not paper.get("arxiv_id"):
+            return False
+        if not paper.get("abstract") or len(paper.get("abstract").strip()) < 50:
+            return False
+
+    elif provider == "semantic_scholar":
+        if not paper.get("semantic_scholar_id"):
+            return False
+
+    # Check for valid year if present
+    year = paper.get("publication_year")
+    if year and (year < 1800 or year > 2100):
+        return False
+        
+    return True
+
 
 
 search_service = SearchService()

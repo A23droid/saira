@@ -2,6 +2,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from app.models.project_paper import ProjectPaper
+    from app.models.collection_paper import CollectionPaper
 
 import uuid
 from datetime import datetime
@@ -40,6 +41,9 @@ class Paper(Base):
     )
 
     project_papers: Mapped[list["ProjectPaper"]] = relationship(
+        back_populates="paper", cascade="all, delete-orphan"
+    )
+    collection_papers: Mapped[list["CollectionPaper"]] = relationship(
         back_populates="paper", cascade="all, delete-orphan"
     )
 

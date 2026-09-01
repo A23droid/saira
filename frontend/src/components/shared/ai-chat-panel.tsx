@@ -2,45 +2,91 @@
 
 import { useEffect, useRef, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Sparkles, ArrowUp, User, AlertCircle } from "lucide-react";
+import { Sparkles, ArrowUp, User, AlertCircle, ExternalLink } from "lucide-react";
+import Link from "next/link";
 import { ChatMessage } from "@/lib/types";
 import { Button } from "@/components/ui/button";
-import { askPaperQA, modelLabel } from "@/lib/api/ai";
+import { getChatSessions, createChatSession, addChatMessage } from "@/lib/api/chat";
+import { projectChat, ChatCitation } from "@/lib/api/project_ai";
+import { createSavedArtifact } from "@/lib/api/projects";
+import { BookmarkPlus, Check } from "lucide-react";
+import toast from "react-hot-toast";
 
 /**
- * AI Chat Panel — wired to the SAIRA backend Q&A endpoint.
+ * AI Chat Panel — supports both paper-scoped and project-scoped chat.
  *
- * When paperId is provided, questions are sent to POST /api/v1/ai/qa
- * which routes them through the AI Router to Llama 3.3 70B via Groq.
+ * When projectId is provided:
+ *   - Uses POST /projects/{projectId}/ai/chat (retrieval + structured citations)
+ *   - Citations are rendered as clickable links below the AI reply
  *
- * When paperId is not provided (e.g. project-level context), the panel
- * shows a notice that paper context is required.
+ * When paperId is provided:
+ *   - Uses the existing /chat/sessions endpoint for paper-level QA
  */
 export function AIChatPanel({
-  initialMessages,
+  initialMessages = [],
   contextLabel,
   placeholder = "Ask about the papers in this project…",
+  projectId,
   paperId,
 }: {
-  initialMessages: ChatMessage[];
+  initialMessages?: ChatMessage[];
   contextLabel?: string;
   placeholder?: string;
-  /** The database UUID of the paper to ask about. Required for real AI Q&A. */
+  projectId?: string;
   paperId?: string;
 }) {
+  const [sessionId, setSessionId] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>(initialMessages);
+  const [messageCitations, setMessageCitations] = useState<Record<string, ChatCitation[]>>({});
   const [input, setInput] = useState("");
   const [thinking, setThinking] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [lastModel, setLastModel] = useState<string | undefined>(undefined);
   const scrollRef = useRef<HTMLDivElement>(null);
 
+  const isProjectMode = Boolean(projectId && !paperId);
+  const hasSomeContext = Boolean(projectId || paperId);
+
+  // Auto-load existing session (for both paper and project modes)
+  useEffect(() => {
+    async function initSession() {
+      if (!paperId && !projectId) return;
+      try {
+        const sessions = await getChatSessions(projectId, paperId);
+        if (sessions.length > 0) {
+          setSessionId(sessions[0].id);
+          if (sessions[0].messages) {
+            setMessages(sessions[0].messages);
+            
+            // Reconstruct basic citations for previous assistant messages
+            const citationsMap: Record<string, ChatCitation[]> = {};
+            sessions[0].messages.forEach((msg) => {
+              const citedIds = msg.citedPaperIds || (msg as any).cited_paper_ids;
+              if (msg.role === "assistant" && citedIds && citedIds.length > 0) {
+                // We only have the IDs from the backend, so we create placeholder citations
+                citationsMap[msg.id] = citedIds.map((id: string) => ({
+                  paper_id: id,
+                  title: "Cited Paper",
+                  reason: "Cited in previous conversation"
+                }));
+              }
+            });
+            setMessageCitations(citationsMap);
+          }
+        }
+      } catch (err) {
+        console.error("Failed to load chat sessions:", err);
+      }
+    }
+    initSession();
+  }, [paperId, projectId]);
+
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
   }, [messages, thinking]);
 
   async function handleSend() {
-    if (!input.trim() || thinking) return;
+    if (!input.trim() || thinking || !hasSomeContext) return;
 
     const userMsg: ChatMessage = {
       id: crypto.randomUUID(),
@@ -54,25 +100,46 @@ export function AIChatPanel({
     setError(null);
 
     try {
-      if (!paperId) {
-        // No paper context — give a helpful notice instead of crashing
+      // ── Project Mode: use new retrieval-backed chat endpoint ──────────────
+      if (isProjectMode && projectId) {
+        const result = await projectChat(projectId, userMsg.content, sessionId);
+        if (result.session_id) setSessionId(result.session_id);
+        if (result.model) setLastModel(result.model);
+
+        const replyId = crypto.randomUUID();
         const reply: ChatMessage = {
-          id: crypto.randomUUID(),
+          id: replyId,
           role: "assistant",
-          content: "Please open a specific paper to ask questions about it. The AI Q&A feature requires a paper context.",
+          content: result.answer,
+          citedPaperIds: result.citations.map((c) => c.paper_id),
           createdAt: new Date().toISOString(),
         };
         setMessages((prev) => [...prev, reply]);
+        if (result.citations.length > 0) {
+          setMessageCitations((prev) => ({ ...prev, [replyId]: result.citations }));
+        }
         return;
       }
 
-      const result = await askPaperQA(paperId, userMsg.content);
-      setLastModel(result.model);
+      // ── Paper Mode: use existing session-based endpoint ────────────────────
+      let activeSessionId = sessionId;
+      if (!activeSessionId) {
+        const newSession = await createChatSession({
+          title: userMsg.content.substring(0, 30) + (userMsg.content.length > 30 ? "..." : ""),
+          paper_id: paperId,
+        });
+        activeSessionId = newSession.id;
+        setSessionId(activeSessionId);
+      }
+
+      const result = await addChatMessage(activeSessionId, userMsg.content);
+      setLastModel(result.ai_message.model);
+
       const reply: ChatMessage = {
-        id: crypto.randomUUID(),
+        id: result.ai_message.id,
         role: "assistant",
-        content: result.answer,
-        createdAt: new Date().toISOString(),
+        content: result.ai_message.content,
+        createdAt: (result.ai_message as any).created_at || new Date().toISOString(),
       };
       setMessages((prev) => [...prev, reply]);
     } catch (err: unknown) {
@@ -83,8 +150,15 @@ export function AIChatPanel({
     }
   }
 
+  const emptyStateText = isProjectMode
+    ? "Ask anything about the papers in this project. SAIRA will retrieve relevant context and cite sources."
+    : paperId
+      ? "Ask any question about this paper. SAIRA will answer using its metadata."
+      : "Open a paper or project to enable AI Q&A.";
+
   return (
     <div className="flex h-full flex-col overflow-hidden rounded-2xl border border-line bg-surface">
+      {/* Header */}
       <div className="flex items-center gap-2 border-b border-line-soft px-5 py-3.5">
         <div className="flex h-7 w-7 items-center justify-center rounded-full bg-teal-50">
           <Sparkles className="h-3.5 w-3.5 text-teal-600" />
@@ -93,23 +167,25 @@ export function AIChatPanel({
           <p className="text-sm font-medium text-ink">Ask SAIRA</p>
           {contextLabel && <p className="text-xs text-ink-faint">{contextLabel}</p>}
         </div>
-        {paperId && lastModel && (
+        {hasSomeContext && lastModel && (
           <span className="ml-auto rounded-full bg-teal-50 px-2 py-0.5 text-[10px] font-medium text-teal-700">
-            {modelLabel(lastModel)}
+            {lastModel}
           </span>
         )}
       </div>
 
+      {/* Messages */}
       <div ref={scrollRef} className="thin-scroll flex-1 space-y-4 overflow-y-auto px-5 py-5">
         {messages.length === 0 && (
-          <p className="text-center text-xs text-ink-faint">
-            {paperId
-              ? "Ask any question about this paper. SAIRA will answer using its metadata."
-              : "Open a paper to enable AI Q&A."}
-          </p>
+          <p className="text-center text-xs text-ink-faint">{emptyStateText}</p>
         )}
         {messages.map((m) => (
-          <ChatBubble key={m.id} message={m} />
+          <ChatBubble
+            key={m.id}
+            message={m}
+            citations={messageCitations[m.id]}
+            projectId={projectId}
+          />
         ))}
         <AnimatePresence>
           {thinking && (
@@ -120,7 +196,7 @@ export function AIChatPanel({
               className="flex items-center gap-2 text-xs text-ink-faint"
             >
               <span className="flex h-6 w-6 items-center justify-center rounded-full bg-teal-50">
-                <Sparkles className="h-3 w-3 text-teal-600" />
+                <Sparkles className="h-3 w-3 text-teal-600 animate-pulse" />
               </span>
               Thinking…
             </motion.div>
@@ -134,6 +210,7 @@ export function AIChatPanel({
         )}
       </div>
 
+      {/* Input */}
       <div className="border-t border-line-soft p-3">
         <div className="flex items-end gap-2 rounded-2xl border border-line bg-paper-dim/40 p-2 focus-within:border-teal-500">
           <textarea
@@ -146,11 +223,11 @@ export function AIChatPanel({
               }
             }}
             rows={1}
-            placeholder={paperId ? placeholder : "Open a paper to enable AI Q&A…"}
-            disabled={!paperId || thinking}
+            placeholder={hasSomeContext ? placeholder : "Open a paper or project to enable AI Q&A…"}
+            disabled={!hasSomeContext || thinking}
             className="max-h-28 flex-1 resize-none bg-transparent px-2 py-1.5 text-sm text-ink placeholder:text-ink-faint focus:outline-none disabled:opacity-50"
           />
-          <Button size="icon" onClick={handleSend} disabled={!input.trim() || thinking || !paperId}>
+          <Button size="icon" onClick={handleSend} disabled={!input.trim() || thinking || !hasSomeContext}>
             <ArrowUp className="h-4 w-4" />
           </Button>
         </div>
@@ -159,13 +236,36 @@ export function AIChatPanel({
   );
 }
 
-function ChatBubble({ message }: { message: ChatMessage }) {
+function ChatBubble({ message, citations, projectId }: { message: ChatMessage; citations?: ChatCitation[]; projectId?: string }) {
   const isUser = message.role === "user";
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+
+  const handleSave = async () => {
+    if (!projectId || saving || saved) return;
+    setSaving(true);
+    try {
+      await createSavedArtifact(projectId, {
+        type: "chat_answer",
+        title: message.content.slice(0, 40) + "...",
+        content: message.content,
+        citedPaperIds: citations?.map(c => c.paper_id) || []
+      });
+      setSaved(true);
+      toast.success("Saved to artifacts");
+    } catch (e) {
+      console.error("Failed to save artifact:", e);
+      toast.error("Failed to save artifact");
+    } finally {
+      setSaving(false);
+    }
+  };
+
   return (
     <motion.div
       initial={{ opacity: 0, y: 8 }}
       animate={{ opacity: 1, y: 0 }}
-      className={`flex gap-2.5 ${isUser ? "flex-row-reverse" : ""}`}
+      className={`group flex gap-2.5 ${isUser ? "flex-row-reverse" : ""}`}
     >
       <div
         className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-full ${
@@ -182,7 +282,42 @@ function ChatBubble({ message }: { message: ChatMessage }) {
         >
           {message.content}
         </div>
+        {/* Citations — only shown for assistant messages */}
+        {!isUser && citations && citations.length > 0 && (
+          <div className="mt-2 space-y-1">
+            {citations.map((c, i) => (
+              <Link
+                key={c.paper_id}
+                href={`/papers/${c.paper_id}`}
+                className="flex items-center gap-1.5 rounded-lg border border-line bg-surface px-2.5 py-1.5 text-xs text-ink-soft hover:border-teal-400 hover:text-teal-700 transition-colors"
+              >
+                <span className="flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-teal-50 text-[10px] font-bold text-teal-600">
+                  {i + 1}
+                </span>
+                <span className="line-clamp-1 flex-1">{c.title}{c.year ? ` (${c.year})` : ""}</span>
+                <ExternalLink className="h-3 w-3 shrink-0 opacity-50" />
+              </Link>
+            ))}
+          </div>
+        )}
+        
+        {!isUser && projectId && (
+          <div className="mt-1 opacity-0 group-hover:opacity-100 transition-opacity">
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-6 text-[10px] text-ink-faint hover:text-teal-600 gap-1 px-2"
+              onClick={handleSave}
+              disabled={saving || saved}
+            >
+              {saved ? <Check className="h-3 w-3 text-green-600" /> : <BookmarkPlus className="h-3 w-3" />}
+              {saved ? "Saved to artifacts" : "Save to artifacts"}
+            </Button>
+          </div>
+        )}
       </div>
     </motion.div>
   );
 }
+
+

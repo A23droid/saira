@@ -52,9 +52,11 @@ class SemanticScholarClient:
     def __init__(self) -> None:
         self.headers = {"User-Agent": "SAIRA/1.0 (research assistant)"}
 
-    async def search_works(self, query: str, limit: int = 20) -> List[Dict[str, Any]]:
+    async def search_works(self, query: str, limit: int = 20, page: int = 1) -> List[Dict[str, Any]]:
+        offset = (page - 1) * limit
         params = {
             "query": query,
+            "offset": offset,
             "limit": min(limit, 100),
             "fields": S2_FIELDS,
         }

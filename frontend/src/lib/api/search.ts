@@ -13,6 +13,8 @@ export interface OpenAlexSearchResult {
   openalex_id?: string | null;
   arxiv_id?: string | null;
   semantic_scholar_id?: string | null;
+  local_id?: string | null;
+  saved_project_ids?: string[];
   // Paper metadata
   doi?: string | null;
   title?: string;

@@ -1,14 +1,30 @@
+"use client";
+
+import { useState, useEffect } from "react";
 import { FileStack, NotebookPen, BookMarked, MessageCircle, Flame, Target } from "lucide-react";
 import { PageHeader } from "@/components/shared/page-header";
 import { StatCard } from "@/components/shared/stat-card";
 import { Card } from "@/components/ui/card";
 import { Progress } from "@/components/ui/progress";
 import { MiniBarChart, MiniBreakdownList } from "@/components/shared/mini-charts";
-import { analyticsSnapshot } from "@/lib/mock-data";
+import { getAnalytics, AnalyticsData, logHistoryEvent } from "@/lib/api/analytics";
 
 export default function AnalyticsPage() {
-  const a = analyticsSnapshot;
-  const goalPct = Math.round((a.weeklyGoal.completed / a.weeklyGoal.target) * 100);
+  const [a, setA] = useState<AnalyticsData | null>(null);
+
+  useEffect(() => {
+    getAnalytics().then(setA).catch(console.error);
+    
+    logHistoryEvent({
+      event_type: "view_page",
+      title: "Viewed Analytics",
+      url: "/analytics"
+    }).catch(console.error);
+  }, []);
+
+  if (!a) return null;
+
+  const goalPct = a.weeklyGoal.target > 0 ? Math.round((a.weeklyGoal.completed / a.weeklyGoal.target) * 100) : 0;
 
   return (
     <div>

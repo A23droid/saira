@@ -36,8 +36,9 @@ async def search_papers(
     q: str,
     limit: int = Query(default=20, ge=1, le=100),
     page: int = Query(default=1, ge=1),
-    source: SearchSource = Query(default="openalex"),
+    source: SearchSource = Query(default="all"),
     current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
 ) -> Any:
     """
     Search external paper sources.
@@ -48,7 +49,7 @@ async def search_papers(
     They are NOT persisted — call POST /search/ingest to save a paper.
     """
     try:
-        return await search_service.search_papers_external(query=q, limit=limit, page=page, source=source)
+        return await search_service.search_papers_external(session=db, query=q, limit=limit, page=page, source=source)
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"External search failed: {str(e)}")
 

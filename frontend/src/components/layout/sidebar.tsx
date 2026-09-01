@@ -48,7 +48,7 @@ export function Sidebar() {
   }
 
   return (
-    <aside className="hidden w-64 shrink-0 flex-col border-r border-line bg-paper-dim/50 px-4 py-6 md:flex">
+    <aside className="hidden sticky top-0 h-screen w-64 shrink-0 flex-col overflow-y-auto thin-scroll border-r border-line bg-paper-dim/50 px-4 py-6 md:flex">
       <Link href="/dashboard" className="px-2">
         <Logo />
       </Link>

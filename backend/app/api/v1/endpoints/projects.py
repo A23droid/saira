@@ -2,13 +2,14 @@ import uuid
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.api.deps import get_db, get_current_user
 from app.models.user import User
 from app.models.paper import Paper
+from app.models.project import Project
 from app.models.project_paper import ProjectPaper
 from app.schemas.project import (
     ProjectCreate,
@@ -18,16 +19,19 @@ from app.schemas.project import (
     ProjectPaperUpdate,
     ProjectPaperResponse,
 )
-from app.schemas.paper import PaperResponse
+from app.schemas.paper import PaperResponse, CitationGraphData, ConceptGraphData
 from app.schemas.reading_data import (
     ProjectPaperReadingData,
     NoteCreate, NoteUpdate, NoteResponse,
     HighlightCreate, HighlightUpdate, HighlightResponse,
     ReadingProgressUpdate, ReadingProgressResponse,
 )
+from app.models.saved_artifact import SavedArtifact
+from app.schemas.saved_artifact import SavedArtifactCreate, SavedArtifactResponse
 from app.services.project_service import project_service
 from app.services.paper_service import paper_service
 from app.services.reading_data_service import reading_data_service
+from app.services.graph_service import graph_service
 
 router = APIRouter()
 
@@ -87,6 +91,30 @@ async def delete_project(
         raise HTTPException(status_code=404, detail="Project not found")
     await project_service.delete_project(session=db, db_project=project)
     return None
+
+
+@router.get("/{project_id}/stats", response_model=dict)
+async def get_project_stats(
+    project_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> Any:
+    # Ensure the user has access to the project
+    await project_service.get_project_by_id(session=db, project_id=project_id, user_id=current_user.id)
+    
+    # Get paper count
+    stmt = select(func.count()).select_from(ProjectPaper).where(ProjectPaper.project_id == project_id)
+    paper_count = await db.scalar(stmt)
+    
+    # Get note count
+    from app.models.note import Note
+    stmt2 = select(func.count()).select_from(Note).join(ProjectPaper).where(ProjectPaper.project_id == project_id)
+    note_count = await db.scalar(stmt2)
+    
+    return {
+        "total_papers": paper_count or 0,
+        "total_notes": note_count or 0,
+    }
 
 
 # ────────────────────────── Project Papers ──────────────────────────
@@ -320,3 +348,99 @@ async def upsert_reading_progress(
     return await reading_data_service.upsert_reading_progress(
         session=db, project_paper_id=project_paper.id, progress_in=progress_in
     )
+
+
+# -- Saved Artifacts --
+
+async def _get_project_or_404(db: AsyncSession, project_id: uuid.UUID, user_id: uuid.UUID) -> Project:
+    project = await project_service.get_project_by_id(session=db, project_id=project_id, user_id=user_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    return project
+
+@router.get("/{project_id}/artifacts", response_model=list[SavedArtifactResponse])
+async def get_project_artifacts(
+    project_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> Any:
+    project = await _get_project_or_404(db, project_id, current_user.id)
+    stmt = select(SavedArtifact).where(SavedArtifact.project_id == project_id, SavedArtifact.user_id == current_user.id).order_by(SavedArtifact.created_at.desc())
+    result = await db.scalars(stmt)
+    return list(result.all())
+
+@router.post("/{project_id}/artifacts", response_model=SavedArtifactResponse, status_code=status.HTTP_201_CREATED)
+async def create_artifact(
+    project_id: uuid.UUID,
+    artifact_in: SavedArtifactCreate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> Any:
+    project = await _get_project_or_404(db, project_id, current_user.id)
+    
+    # Check for duplicates
+    stmt = select(SavedArtifact).where(
+        SavedArtifact.project_id == project.id,
+        SavedArtifact.user_id == current_user.id,
+        SavedArtifact.artifact_type == artifact_in.artifact_type,
+        SavedArtifact.content == artifact_in.content
+    )
+    existing = await db.scalar(stmt)
+    if existing:
+        # Return the existing artifact or raise 409 depending on preference
+        # Returning existing with 200 is often nicer for frontend idempotency
+        return existing
+    
+    artifact = SavedArtifact(
+        project_id=project.id,
+        user_id=current_user.id,
+        paper_id=artifact_in.paper_id,
+        artifact_type=artifact_in.artifact_type,
+        title=artifact_in.title,
+        content=artifact_in.content,
+        cited_paper_ids=artifact_in.cited_paper_ids or []
+    )
+    db.add(artifact)
+    await db.commit()
+    await db.refresh(artifact)
+    return artifact
+
+@router.delete("/{project_id}/artifacts/{artifact_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_artifact(
+    project_id: uuid.UUID,
+    artifact_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> None:
+    project = await _get_project_or_404(db, project_id, current_user.id)
+    stmt = select(SavedArtifact).where(SavedArtifact.id == artifact_id, SavedArtifact.project_id == project_id)
+    artifact = await db.scalar(stmt)
+    if not artifact:
+        raise HTTPException(status_code=404, detail="Artifact not found")
+    
+    
+    await db.delete(artifact)
+    await db.commit()
+    return None
+
+# ── Graphs ──
+
+@router.get("/{project_id}/citation-graph", response_model=CitationGraphData)
+async def get_project_citation_graph(
+    project_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> Any:
+    # Ensure project access
+    project = await _get_project_or_404(db, project_id, current_user.id)
+    return await graph_service.get_project_citation_graph(session=db, project_id=project.id)
+
+@router.get("/{project_id}/concept-graph", response_model=ConceptGraphData)
+async def get_project_concept_graph(
+    project_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> Any:
+    # Ensure project access
+    project = await _get_project_or_404(db, project_id, current_user.id)
+    return await graph_service.get_project_concept_graph(session=db, project_id=project.id)

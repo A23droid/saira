@@ -88,9 +88,11 @@ def _parse_entry(entry: ET.Element) -> Optional[Dict[str, Any]]:
 
 
 class ArxivClient:
-    async def search_works(self, query: str, limit: int = 20) -> List[Dict[str, Any]]:
+    async def search_works(self, query: str, limit: int = 20, page: int = 1) -> List[Dict[str, Any]]:
+        offset = (page - 1) * limit
         params = {
             "search_query": f"all:{query}",
+            "start": offset,
             "max_results": limit,
             "sortBy": "relevance",
         }

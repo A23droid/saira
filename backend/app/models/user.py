@@ -3,6 +3,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from app.models.refresh_token import RefreshToken
     from app.models.project import Project
+    from app.models.collection import Collection
 
 import uuid
 from datetime import datetime
@@ -68,6 +69,9 @@ class User(Base):
     )
 
     refresh_tokens: Mapped[list["RefreshToken"]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
+    collections: Mapped[list["Collection"]] = relationship(
         back_populates="user", cascade="all, delete-orphan"
     )
 

@@ -23,14 +23,19 @@ from app.api.deps import get_db, get_current_user
 from app.models.user import User
 from app.schemas.ai import (
     AISummaryRequest,
-    AISummaryResponse,
     AIExtractionRequest,
-    AIExtractionResponse,
     AIQARequest,
+    PRDRequest,
+    IndependentReviewRequest,
+    AISummaryResponse,
+    AIExtractionResponse,
     AIQAResponse,
+    PRDResponse,
     AIStatusResponse,
+    LiteratureReviewContent
 )
 from app.services.ai_router import ai_router
+from app.services.prd_engine import prd_engine
 from app.services.groq_service import GroqServiceError
 from app.services.paper_service import paper_service
 from app.core.config import settings
@@ -182,5 +187,96 @@ async def paper_qa(
 
     try:
         return await ai_router.answer_question(_paper_to_dict(paper), req.question)
+    except GroqServiceError as exc:
+        raise _handle_groq_error(exc)
+
+
+# ── Personalized Research Delta (PRD) ─────────────────────────────────────────
+
+@router.post("/prd", response_model=PRDResponse)
+async def calculate_prd(
+    req: PRDRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> PRDResponse:
+    """
+    Calculate the Personalized Research Delta (PRD) for a candidate paper 
+    against a user's specific project workspace.
+    """
+    try:
+        paper_id = uuid.UUID(req.paper_id)
+        project_id = uuid.UUID(req.project_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid UUID format.")
+
+    paper = await paper_service.get_paper_by_id(session=db, paper_id=paper_id)
+    if not paper:
+        raise HTTPException(status_code=404, detail="Candidate paper not found.")
+
+    try:
+        return await prd_engine.calculate_prd(session=db, project_id=project_id, paper=paper)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except GroqServiceError as exc:
+        raise _handle_groq_error(exc)
+
+
+# ── Independent Literature Review ─────────────────────────────────────────────
+
+@router.post("/review", response_model=LiteratureReviewContent)
+async def generate_independent_review(
+    req: IndependentReviewRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> LiteratureReviewContent:
+    """
+    Generate an independent literature review for an arbitrary list of papers.
+    """
+    import asyncio
+    
+    if not req.paper_ids:
+        raise HTTPException(status_code=400, detail="Must provide at least one paper ID.")
+    
+    if len(req.paper_ids) > 20:
+        raise HTTPException(status_code=400, detail="Maximum 20 papers allowed for independent review.")
+        
+    paper_dicts = []
+    for pid in req.paper_ids:
+        try:
+            puuid = uuid.UUID(pid)
+            p = await paper_service.get_paper_by_id(session=db, paper_id=puuid)
+            if p:
+                paper_dicts.append(_paper_to_dict(p))
+        except ValueError:
+            continue
+            
+    if not paper_dicts:
+        raise HTTPException(status_code=404, detail="No valid papers found.")
+        
+    # Analyze papers in parallel (or batched)
+    BATCH_SIZE = 10
+    analyses = []
+    for i in range(0, len(paper_dicts), BATCH_SIZE):
+        batch = paper_dicts[i: i + BATCH_SIZE]
+        tasks = [ai_router.analyze_paper_for_review(p) for p in batch]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        for j, result in enumerate(results):
+            if isinstance(result, Exception):
+                analyses.append({
+                    "paper_id": str(batch[j].get("id", "")),
+                    "title": batch[j].get("title", "Unknown"),
+                    "year": batch[j].get("publication_year"),
+                    "authors": "Unknown",
+                    "research_problem": None, "methodology": None,
+                    "datasets": [], "models": [], "algorithms": [],
+                    "metrics": [], "key_findings": [], "limitations": [],
+                    "future_work": [], "contribution": None,
+                })
+            else:
+                analyses.append(result)
+                
+    try:
+        content = await ai_router.synthesize_literature_review(analyses, "Independent Custom Review")
+        return content
     except GroqServiceError as exc:
         raise _handle_groq_error(exc)

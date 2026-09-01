@@ -28,9 +28,7 @@ import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { AIChatPanel } from "@/components/shared/ai-chat-panel";
 import { ReadingProgressCard } from "@/components/shared/reading-progress";
-import { RelatedPapersPanel } from "@/components/shared/related-papers-panel";
 import { SavedArtifactsPanel } from "@/components/shared/saved-artifacts-panel";
-import { GraphPlaceholder } from "@/components/shared/graph-placeholder";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import {
   Dialog,
@@ -41,11 +39,12 @@ import {
   DialogFooter,
 } from "@/components/ui/dialog";
 
-import { getPaperById, getPaperProjects, BackendPaper } from "@/lib/api/papers";
+import { getPaperById, getPaperProjects, getSimilarPapers, BackendPaper } from "@/lib/api/papers";
 import { getProjects, addPaperToProject, updateProjectPaper } from "@/lib/api/projects";
 import { getReadingData, createNote, deleteNote, createHighlight, deleteHighlight, updateReadingProgress, ProjectPaperReadingData } from "@/lib/api/reading_data";
-import { fetchPaperSummary, fetchPaperExtraction, AISummaryResponse, AIExtractionResponse, modelLabel } from "@/lib/api/ai";
-import { Project } from "@/lib/types";
+import { fetchPaperSummary, fetchPaperExtraction, calculatePRD, AISummaryResponse, AIExtractionResponse, PRDResponse, modelLabel } from "@/lib/api/ai";
+import { logHistoryEvent } from "@/lib/api/analytics";
+import { Project, Paper } from "@/lib/types";
 import { Loader2 } from "lucide-react";
 
 export default function PaperDetailsPage({ params }: { params: Promise<{ id: string }> }) {
@@ -54,6 +53,8 @@ export default function PaperDetailsPage({ params }: { params: Promise<{ id: str
   const [paper, setPaper] = useState<BackendPaper | null>(null);
   const [paperProjects, setPaperProjects] = useState<Project[]>([]);
   const [allProjects, setAllProjects] = useState<Project[]>([]);
+  
+  const [similarPapers, setSimilarPapers] = useState<BackendPaper[]>([]);
   
   const [selectedProjectId, setSelectedProjectId] = useState<string>("");
   const [readingData, setReadingData] = useState<ProjectPaperReadingData | null>(null);
@@ -75,6 +76,11 @@ export default function PaperDetailsPage({ params }: { params: Promise<{ id: str
   const [aiExtractionLoading, setAiExtractionLoading] = useState(false);
   const [aiExtractionError, setAiExtractionError] = useState<string | null>(null);
   const [aiExtractionLoaded, setAiExtractionLoaded] = useState(false);
+
+  const [prdLoading, setPrdLoading] = useState(false);
+  const [prdLoaded, setPrdLoaded] = useState(false);
+  const [prdData, setPrdData] = useState<PRDResponse | null>(null);
+  const [prdError, setPrdError] = useState<string | null>(null);
   
   // Fetch Paper & Projects it belongs to
   useEffect(() => {
@@ -84,12 +90,14 @@ export default function PaperDetailsPage({ params }: { params: Promise<{ id: str
       getPaperById(id),
       getPaperProjects(id),
       getProjects(),
+      getSimilarPapers(id).catch(() => []),
     ])
-    .then(([p, pProjs, allProjs]) => {
+    .then(([p, pProjs, allProjs, similar]) => {
       if (active) {
         setPaper(p);
         setPaperProjects(pProjs);
         setAllProjects(allProjs);
+        setSimilarPapers(similar as BackendPaper[]);
         
         if (pProjs.length > 0) {
           setSelectedProjectId(pProjs[0].id);
@@ -119,6 +127,17 @@ export default function PaperDetailsPage({ params }: { params: Promise<{ id: str
       
     return () => { active = false; };
   }, [selectedProjectId, id]);
+
+  useEffect(() => {
+    if (paper) {
+      logHistoryEvent({
+        event_type: "view_paper",
+        reference_id: paper.id,
+        title: paper.title,
+        url: `/papers/${paper.id}`,
+      }).catch(console.error);
+    }
+  }, [paper]);
 
   if (paper === null) return <div className="p-10 text-center">Loading...</div>;
 
@@ -354,8 +373,7 @@ export default function PaperDetailsPage({ params }: { params: Promise<{ id: str
               <TabsTrigger value="highlights">Highlights ({readingData?.highlights?.length || 0})</TabsTrigger>
               <TabsTrigger value="summary">AI summary</TabsTrigger>
               <TabsTrigger value="extracted">Extracted info</TabsTrigger>
-              <TabsTrigger value="related">Related work</TabsTrigger>
-              <TabsTrigger value="graphs">Graphs</TabsTrigger>
+              <TabsTrigger value="prd">PRD (Delta)</TabsTrigger>
             </TabsList>
 
             <TabsContent value="notes">
@@ -611,28 +629,6 @@ export default function PaperDetailsPage({ params }: { params: Promise<{ id: str
               ) : null}
             </TabsContent>
 
-            <TabsContent value="related">
-              <p className="mb-4 text-sm text-ink-soft">
-                Papers SAIRA has identified as agreeing with or challenging this one's claims.
-              </p>
-              <RelatedPapersPanel links={[]} />
-            </TabsContent>
-
-            <TabsContent value="graphs">
-              <div className="grid gap-5 sm:grid-cols-2">
-                <GraphPlaceholder
-                  icon={Share2}
-                  title="Citation graph"
-                  description="Papers this one cites, and papers that cite it, visualized as a network."
-                />
-                <GraphPlaceholder
-                  icon={Waypoints}
-                  title="Concept graph"
-                  description="Key concepts in this paper and how they connect to related work."
-                  accent="brass"
-                />
-              </div>
-            </TabsContent>
           </Tabs>
         </div>
 
@@ -652,7 +648,16 @@ export default function PaperDetailsPage({ params }: { params: Promise<{ id: str
               <h3 className="font-medium text-ink">Similar papers</h3>
             </div>
             <div className="flex flex-col gap-2">
-              <p className="text-sm text-ink-faint">Similar papers discovery is disabled in this MVP.</p>
+              {similarPapers.length === 0 ? (
+                <p className="text-sm text-ink-faint">No similar papers found.</p>
+              ) : (
+                similarPapers.map((sp) => (
+                  <Link key={sp.id} href={`/papers/${sp.id}`} className="flex flex-col gap-1 p-3 rounded-xl border border-line bg-surface hover:border-teal-500 hover:bg-teal-50/40 transition-colors">
+                    <span className="text-sm font-medium text-ink line-clamp-2 leading-snug">{sp.title}</span>
+                    <span className="text-xs text-ink-faint">{sp.venue || sp.source || "Unknown Venue"} {sp.publication_year || ""}</span>
+                  </Link>
+                ))
+              )}
             </div>
           </div>
         </div>
