@@ -37,3 +37,40 @@ export async function addChatMessage(sessionId: string, question: string): Promi
     body: JSON.stringify({ question }),
   });
 }
+
+// ── Paper chat mode ──────────────────────────────────────────────────────────
+// A paper chat is persistent only while the paper is saved to one of the user's
+// projects. The server decides; the panel just renders what it is told.
+
+export type ChatMode = "ephemeral" | "persistent";
+
+export interface PaperChatContext {
+  mode: ChatMode;
+  session_id: string | null;
+  messages: ChatMessage[];
+}
+
+export async function getPaperChatContext(paperId: string): Promise<PaperChatContext> {
+  return apiFetch<PaperChatContext>(`/chat/papers/${paperId}/context`);
+}
+
+export async function askPaperEphemeral(
+  paperId: string,
+  question: string,
+  history: { role: string; content: string }[],
+): Promise<{ ai_message: ChatMessage & { grounded: boolean; model: string } }> {
+  return apiFetch(`/chat/papers/${paperId}/ephemeral`, {
+    method: "POST",
+    body: JSON.stringify({ question, history }),
+  });
+}
+
+export async function promotePaperChat(
+  paperId: string,
+  messages: { role: string; content: string }[],
+): Promise<{ mode: ChatMode; session_id: string; migrated: number }> {
+  return apiFetch(`/chat/papers/${paperId}/promote`, {
+    method: "POST",
+    body: JSON.stringify({ messages }),
+  });
+}

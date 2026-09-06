@@ -734,6 +734,9 @@ export default function PaperDetailsPage({ params }: { params: Promise<{ id: str
               <AIChatPanel
                 initialMessages={[]}
                 paperId={id}
+                // Drives ephemeral vs persistent. Saving the paper from this
+                // page flips it, which promotes the conversation in place.
+                paperSaved={paperProjects.length > 0}
                 contextLabel={`Answering from "${paper.title.slice(0, 30)}${paper.title.length > 30 ? "…" : ""}"`}
                 placeholder="Ask a question about this paper…"
               />

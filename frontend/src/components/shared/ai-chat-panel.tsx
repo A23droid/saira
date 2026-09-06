@@ -6,7 +6,10 @@ import { Sparkles, ArrowUp, User, AlertCircle, ExternalLink } from "lucide-react
 import Link from "next/link";
 import { ChatMessage } from "@/lib/types";
 import { Button } from "@/components/ui/button";
-import { getChatSessions, createChatSession, addChatMessage } from "@/lib/api/chat";
+import {
+  getChatSessions, createChatSession, addChatMessage,
+  getPaperChatContext, askPaperEphemeral, promotePaperChat, ChatMode,
+} from "@/lib/api/chat";
 import { projectChat, ChatCitation } from "@/lib/api/project_ai";
 import { createSavedArtifact } from "@/lib/api/projects";
 import { BookmarkPlus, Check } from "lucide-react";
@@ -22,20 +25,59 @@ import toast from "react-hot-toast";
  * When paperId is provided:
  *   - Uses the existing /chat/sessions endpoint for paper-level QA
  */
+/** Ephemeral history in the shape the API accepts. Content is clipped to the
+ *  server's per-message limit so a long reply cannot 422 the next turn. */
+function toTurns(msgs: ChatMessage[]) {
+  return msgs.map((m) => ({ role: m.role, content: m.content.slice(0, 8000) }));
+}
+
+/** The paper-chat endpoints return snake_case rows straight from the DB. */
+function normalizeMessage(m: any): ChatMessage {
+  return {
+    id: m.id ?? crypto.randomUUID(),
+    role: m.role,
+    content: m.content,
+    citedPaperIds: m.citedPaperIds ?? m.cited_paper_ids ?? [],
+    createdAt: m.createdAt ?? m.created_at ?? new Date().toISOString(),
+  };
+}
+
+/** Restored history carries cited paper IDs but not the original evidence, so
+ *  older replies get link-only citations rather than fabricated reasons. */
+function placeholderCitations(msgs: any[]): Record<string, ChatCitation[]> {
+  const out: Record<string, ChatCitation[]> = {};
+  for (const m of msgs) {
+    const ids = m.citedPaperIds ?? m.cited_paper_ids ?? [];
+    if (m.role === "assistant" && ids.length > 0) {
+      out[m.id] = ids.map((id: string) => ({
+        paper_id: id,
+        title: "Cited Paper",
+        reason: "Cited in previous conversation",
+      }));
+    }
+  }
+  return out;
+}
+
 export function AIChatPanel({
   initialMessages = [],
   contextLabel,
   placeholder = "Ask about the papers in this project…",
   projectId,
   paperId,
+  paperSaved,
 }: {
   initialMessages?: ChatMessage[];
   contextLabel?: string;
   placeholder?: string;
   projectId?: string;
   paperId?: string;
+  /** Whether the paper is in one of the user's projects. Flipping this to true
+   *  promotes an in-progress ephemeral conversation to persistent. */
+  paperSaved?: boolean;
 }) {
   const [sessionId, setSessionId] = useState<string | null>(null);
+  const [chatMode, setChatMode] = useState<ChatMode | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>(initialMessages);
   const [messageCitations, setMessageCitations] = useState<Record<string, ChatCitation[]>>({});
   const [input, setInput] = useState("");
@@ -52,6 +94,20 @@ export function AIChatPanel({
     async function initSession() {
       if (!paperId && !projectId) return;
       try {
+        // Paper mode: the server decides ephemeral vs persistent from whether
+        // the paper is saved, and returns the history to restore. An ephemeral
+        // paper has none by definition, so a reopen starts blank.
+        if (paperId && !projectId) {
+          const ctx = await getPaperChatContext(paperId);
+          setChatMode(ctx.mode);
+          setSessionId(ctx.session_id);
+          if (ctx.messages.length > 0) {
+            setMessages(ctx.messages.map(normalizeMessage));
+            setMessageCitations(placeholderCitations(ctx.messages));
+          }
+          return;
+        }
+
         const sessions = await getChatSessions(projectId, paperId);
         if (sessions.length > 0) {
           setSessionId(sessions[0].id);
@@ -80,6 +136,31 @@ export function AIChatPanel({
     }
     initSession();
   }, [paperId, projectId]);
+
+  // Promotion: saving the paper mid-conversation carries that conversation into
+  // the persistent session. Nothing is written until the save has succeeded.
+  const messagesRef = useRef<ChatMessage[]>(messages);
+  messagesRef.current = messages;
+
+  useEffect(() => {
+    if (!paperId || projectId) return;
+    if (!paperSaved || chatMode !== "ephemeral") return;
+    let active = true;
+    (async () => {
+      try {
+        const res = await promotePaperChat(paperId, toTurns(messagesRef.current));
+        if (!active) return;
+        setSessionId(res.session_id);
+        setChatMode("persistent");
+      } catch (err) {
+        // The paper is saved regardless; only the carry-over failed. Staying in
+        // ephemeral mode is the honest state — the banner keeps saying the
+        // conversation is not stored, which is true.
+        console.error("Failed to promote paper chat:", err);
+      }
+    })();
+    return () => { active = false; };
+  }, [paperId, projectId, paperSaved, chatMode]);
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
@@ -121,7 +202,19 @@ export function AIChatPanel({
         return;
       }
 
-      // ── Paper Mode: use existing session-based endpoint ────────────────────
+      // ── Paper Mode, ephemeral: nothing is stored server-side. The history
+      //    the model sees comes from this page and dies with it. ────────────
+      if (paperId && chatMode === "ephemeral") {
+        const result = await askPaperEphemeral(paperId, userMsg.content, toTurns(messages));
+        setLastModel(result.ai_message.model);
+        setMessages((prev) => [
+          ...prev,
+          normalizeMessage({ ...result.ai_message, id: crypto.randomUUID() }),
+        ]);
+        return;
+      }
+
+      // ── Paper Mode, persistent: session-backed, history stored ────────────
       let activeSessionId = sessionId;
       if (!activeSessionId) {
         const newSession = await createChatSession({
@@ -166,6 +259,13 @@ export function AIChatPanel({
         <div>
           <p className="text-sm font-medium text-ink">Ask SAIRA</p>
           {contextLabel && <p className="text-xs text-ink-faint">{contextLabel}</p>}
+          {paperId && chatMode && (
+            <p className="text-xs text-ink-faint">
+              {chatMode === "ephemeral"
+                ? "Temporary chat — save this paper to a project to keep your conversation."
+                : "Saved to a project — chat history is kept."}
+            </p>
+          )}
         </div>
         {hasSomeContext && lastModel && (
           <span className="ml-auto rounded-full bg-teal-50 px-2 py-0.5 text-[10px] font-medium text-teal-700">

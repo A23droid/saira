@@ -52,17 +52,36 @@ async def _probe():
         await neo4j_client.connect()
         s = await neo4j_client.get_session()
         async with s:
-            row = await (await s.run(
+            rows = await (await s.run(
                 """
                 MATCH (p:Paper)-[:HAS_CHUNK]->(c:Chunk)
                 WHERE c.embedding IS NOT NULL
-                RETURN p.id AS id, count(c) AS n ORDER BY n DESC LIMIT 1
-                """)).single()
+                RETURN p.id AS id, count(c) AS n ORDER BY n DESC LIMIT 25
+                """)).data()
+
+        # A persistent paper chat session now requires the paper to be saved in
+        # one of this user's projects, so the target has to be a saved paper --
+        # the most-chunked paper overall may be one nobody kept.
+        from app.models.project_paper import ProjectPaper
+
+        paper_id = None
+        for row in rows:
+            saved = await db.scalar(
+                select(ProjectPaper.id)
+                .join(Project, Project.id == ProjectPaper.project_id)
+                .where(ProjectPaper.paper_id == uuid.UUID(row["id"]),
+                       Project.user_id == user.id)
+                .limit(1)
+            )
+            if saved:
+                paper_id = row["id"]
+                break
+
         return {
             "user_id": str(user.id),
             "project_id": str(project.id) if project else None,
             "foreign_project_id": str(foreign.id) if foreign else None,
-            "paper_id": row["id"] if row else None,
+            "paper_id": paper_id,
         }
 
 
