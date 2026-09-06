@@ -10,10 +10,11 @@ from app.api.deps import get_db, get_current_user
 from app.models.user import User
 from app.models.chat import ChatSession, ChatMessage
 from app.models.paper import Paper
-from app.schemas.ai import AIQARequest, AIQAResponse
+from app.core.config import settings
+from app.schemas.ai import AIQARequest
 from app.services.ai_router import ai_router
-from app.services.project_context import project_context_builder
-from app.api.v1.endpoints.ai import _paper_to_dict
+from app.services.groq_service import GroqServiceError
+from app.services.retrieval_service import ScopeError, retrieval_service
 
 router = APIRouter()
 
@@ -54,11 +55,45 @@ async def create_chat_session(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> Any:
-    """Create a new chat session."""
+    """Create a new chat session.
+
+    The project/paper context is verified here, at creation time. Previously
+    this accepted whatever `project_id` the client sent with no ownership
+    check; combined with the project context builder being called without a
+    `user_id` further down, that let a session be pointed at another user's
+    project and read its contents back through the answer. Both halves are now
+    closed — this endpoint rejects a foreign project, and retrieval scope
+    resolution requires a user_id.
+    """
+    project_id = data.get("project_id")
+    paper_id = data.get("paper_id")
+
+    if project_id:
+        try:
+            scope = await retrieval_service.resolve_project_scope(
+                db, project_id, current_user.id
+            )
+        except ScopeError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.detail)
+        project_id = scope.scope_id
+
+    if paper_id:
+        try:
+            paper_scope = await retrieval_service.resolve_paper_scope(db, paper_id)
+        except ScopeError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.detail)
+        paper_id = paper_scope.scope_id
+
+    if not project_id and not paper_id:
+        raise HTTPException(
+            status_code=400,
+            detail="A chat session requires either a project_id or a paper_id.",
+        )
+
     session = ChatSession(
         user_id=current_user.id,
-        project_id=data.get("project_id"),
-        paper_id=data.get("paper_id"),
+        project_id=project_id,
+        paper_id=paper_id,
         title=data.get("title", "New Chat")
     )
     db.add(session)
@@ -120,6 +155,9 @@ async def add_chat_message(
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
+    if not request.question or not request.question.strip():
+        raise HTTPException(status_code=400, detail="Question cannot be empty.")
+
     # Add user message
     user_msg = ChatMessage(
         session_id=session.id,
@@ -128,35 +166,64 @@ async def add_chat_message(
         cited_paper_ids=[]
     )
     db.add(user_msg)
-    
-    # Build history for context
-    history = [{"role": m.role, "content": m.content} for m in session.messages]
 
-    # Generate AI response based on context
-    ai_resp = None
-    if session.paper_id:
-        paper = await db.scalar(select(Paper).where(Paper.id == session.paper_id))
-        if not paper:
-            raise HTTPException(status_code=404, detail="Context paper not found")
-        ai_resp = await ai_router.answer_question(_paper_to_dict(paper), request.question, history)
-    elif session.project_id:
-        proj_context = await project_context_builder.build_context(db, session.project_id)
-        ai_resp = await ai_router.project_answer_question(proj_context, request.question, history)
+    # Bounded history. This used to pass every message the session had ever
+    # accumulated, which grew the prompt without limit and (with a reasoning
+    # model billing its chain of thought against max_tokens) eventually
+    # returned empty answers. In evaluation mode no history is sent at all, so
+    # a previous turn cannot supply a fact the current retrieval did not.
+    if settings.eval_mode:
+        history = []
     else:
-        raise HTTPException(status_code=400, detail="Session has no context (no paper or project)")
+        recent = session.messages[-settings.RAG_MAX_HISTORY_MESSAGES:]
+        history = [{"role": m.role, "content": m.content} for m in recent]
 
-    # Add AI message
+    # -- Resolve scope server-side ---------------------------------------------
+    try:
+        if session.paper_id:
+            scope = await retrieval_service.resolve_paper_scope(db, session.paper_id)
+        elif session.project_id:
+            scope = await retrieval_service.resolve_project_scope(
+                db, session.project_id, current_user.id
+            )
+        else:
+            raise HTTPException(
+                status_code=400, detail="Session has no context (no paper or project)"
+            )
+    except ScopeError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail)
+
+    if scope.is_empty:
+        raise HTTPException(
+            status_code=400,
+            detail="This project has no papers yet. Add papers before asking questions.",
+        )
+
+    # -- Retrieve, then generate ----------------------------------------------
+    retrieval = await retrieval_service.retrieve(scope, request.question)
+    try:
+        ai_resp = await ai_router.answer_scoped(
+            scope=scope, question=request.question,
+            retrieval=retrieval, history=history,
+        )
+    except GroqServiceError as exc:
+        raise HTTPException(status_code=502, detail=f"AI service error: {exc}")
+
+    # Citations are already validated against the evidence actually sent to the
+    # model, so these IDs cannot reference a paper outside the scope.
+    cited_paper_ids = sorted({c.paper_id for c in ai_resp.citations})
+
     ai_msg = ChatMessage(
         session_id=session.id,
         role="assistant",
         content=ai_resp.answer,
-        cited_paper_ids=[] # You'd extract these if parsed from the answer
+        cited_paper_ids=cited_paper_ids,
     )
     db.add(ai_msg)
-    
+
     await db.commit()
     await db.refresh(ai_msg)
-    
+
     return {
         "user_message": {
             "id": str(user_msg.id),
@@ -168,6 +235,11 @@ async def add_chat_message(
             "role": ai_msg.role,
             "content": ai_msg.content,
             "grounded": ai_resp.grounded,
-            "model": ai_resp.model
+            "abstained": ai_resp.abstained,
+            "model": ai_resp.model,
+            "cited_paper_ids": cited_paper_ids,
+            "citations": [c.model_dump() for c in ai_resp.citations],
+            "evidence": [e.model_dump() for e in ai_resp.evidence],
+            "retrieval": ai_resp.retrieval.model_dump() if ai_resp.retrieval else None,
         }
     }

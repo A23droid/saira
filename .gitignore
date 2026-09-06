@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# Test / lint caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Node
+node_modules/
+.next/
+out/
+
+# Secrets and local config
+.env
+.env.*
+!.env.example
+
+# OS
+.DS_Store
+Thumbs.db
+
+# One-off debug scripts kept locally, never part of the product.
+backend/scratch_verify.py
+backend/test_e2e.py
+backend/test_index.py
+backend/test_qa.py
+
+# Generated evaluation run output. The harness under evaluation/ is committed;
+# its results are not — they are reproducible and dated.
+evaluation/reports/*-report.md
+evaluation/reports/*-results.json
+evaluation/reports/traces/
+evaluation/reports/LATEST.md

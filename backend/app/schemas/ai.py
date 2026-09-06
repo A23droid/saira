@@ -34,6 +34,10 @@ class AITask(str, Enum):
     PROJECT_CHAT = "project_chat"
     LIT_REVIEW_PAPER = "lit_review_paper"
     LIT_REVIEW_SYNTHESIS = "lit_review_synthesis"
+    # Knowledge-graph tasks
+    CONCEPT_EXTRACTION = "concept_extraction"
+    # Unified scoped RAG (Paper Chat + Project Chat)
+    SCOPED_RAG = "scoped_rag"
 
 
 # ── Request Schemas ────────────────────────────────────────────────────────────
@@ -72,6 +76,51 @@ class ChatCitation(BaseModel):
     title: str
     year: Optional[int] = None
     reason: str  # Why this paper was cited
+    # Chunk-level provenance. A claim comes from a specific passage, so citing
+    # the whole paper loses the only part a reader can actually check. These
+    # are populated from the retrieved evidence the model was given, never from
+    # what the model wrote, so they cannot be fabricated.
+    chunk_id: Optional[str] = None
+    page: Optional[int] = None
+    score: Optional[float] = None
+
+
+class EvidenceRef(BaseModel):
+    """One retrieved chunk, as it was presented to the model."""
+    chunk_id: str
+    paper_id: str
+    page: Optional[int] = None
+    chunk_index: Optional[int] = None
+    score: float = 0.0
+    paper_title: Optional[str] = None
+    text: Optional[str] = None
+
+
+class RetrievalDebug(BaseModel):
+    """Inspectable retrieval trace — populated in evaluation/debug mode."""
+    scope_type: str
+    scope_id: str
+    paper_ids: List[str] = []
+    candidate_count: int = 0
+    retrieved_chunk_ids: List[str] = []
+    similarity_scores: List[float] = []
+    retrieval_latency_ms: float = 0.0
+    embedding_dim: int = 0
+    error: Optional[str] = None
+
+
+class ScopedAnswer(BaseModel):
+    """Unified answer shape for Paper Chat and Project Chat alike."""
+    answer: str
+    grounded: bool = True
+    abstained: bool = False
+    citations: List[ChatCitation] = []
+    evidence: List[EvidenceRef] = []
+    model: Optional[str] = None
+    session_id: Optional[str] = None
+    retrieval: Optional[RetrievalDebug] = None
+    prompt_chars: int = 0
+    generation_latency_ms: float = 0.0
 
 
 # ── Response Schemas ───────────────────────────────────────────────────────────

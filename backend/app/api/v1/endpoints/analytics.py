@@ -21,7 +21,7 @@ async def get_analytics(
     current_user: User = Depends(get_current_user),
 ) -> Any:
     # 1. Total papers saved (across all projects, distinct or total instances? Let's do distinct papers saved)
-    stmt_papers = select(func.count(ProjectPaper.id)).where(
+    stmt_papers = select(func.count(func.distinct(ProjectPaper.paper_id))).where(
         ProjectPaper.project.has(user_id=current_user.id)
     )
     total_papers = await db.scalar(stmt_papers) or 0

@@ -130,4 +130,50 @@ class SemanticScholarClient:
                     
         return []
 
+    async def get_citations_and_references(self, paper_id: str, limit: int = 100) -> Dict[str, List[Dict[str, Any]]]:
+        """
+        Fetch papers that cite this paper (citations) and papers that this paper cites (references).
+        Returns: {"citations": [...], "references": [...]}
+        """
+        fields = "paperId,externalIds,title,year,venue,openAccessPdf"
+        
+        async def fetch_edge(edge_type: str) -> List[Dict[str, Any]]:
+            params = {"fields": fields, "limit": limit}
+            for attempt in range(3):
+                async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as client:
+                    response = await client.get(
+                        f"{S2_BASE_URL}/paper/{paper_id}/{edge_type}",
+                        params=params,
+                        headers=self.headers,
+                    )
+                    if response.status_code == 404:
+                        return []
+                    if response.status_code == 429:
+                        await asyncio.sleep(2 ** attempt)
+                        continue
+                    
+                    try:
+                        response.raise_for_status()
+                        data = response.json()
+                        edges = data.get("data", [])
+                        
+                        # Extract the inner paper object ('citingPaper' for citations, 'citedPaper' for references)
+                        key = "citingPaper" if edge_type == "citations" else "citedPaper"
+                        papers = [edge.get(key) for edge in edges if edge.get(key) and edge.get(key).get("title")]
+                        
+                        return [_normalize_s2(p) for p in papers]
+                    except Exception:
+                        return []
+            return []
+            
+        citations, references = await asyncio.gather(
+            fetch_edge("citations"),
+            fetch_edge("references")
+        )
+        
+        return {
+            "citations": citations,
+            "references": references
+        }
+
 semantic_scholar_client = SemanticScholarClient()

@@ -23,7 +23,9 @@ unless a platform is called out explicitly.
 |---|---|---|
 | Python | 3.13+ | 3.12 also works — nothing here uses 3.13-only syntax |
 | Node.js | 20+ | includes `npm` |
-| PostgreSQL | 14+ | server running locally, or reachable over the network |
+| PostgreSQL | 14+ | Relational database (can use Docker) |
+| Neo4j | 5+ | Graph database (can use Docker) |
+| Docker | latest | Optional, but recommended for running databases |
 | Git | any recent version | |
 
 **Windows-specific:** install Python and Node from their official
@@ -53,8 +55,23 @@ cd saira
 
 ---
 
-## 3. Database setup
+## 3. Database & Graph Setup
 
+SAIRA requires both PostgreSQL (for relational data) and Neo4j (for the graph).
+
+### Option A: Docker Compose (Recommended)
+
+The easiest way to get both databases running locally is using Docker. If you have Docker Desktop installed, simply run from the project root:
+
+```bash
+docker-compose up -d
+```
+
+This starts PostgreSQL on port `5432` and Neo4j on ports `7474` (HTTP) and `7687` (Bolt). You can skip to **Section 4** if you use this method.
+
+### Option B: Manual Setup
+
+**1. PostgreSQL:**
 Create the database once, using whichever `psql` client you have:
 
 ```bash
@@ -72,8 +89,11 @@ will prompt for one, or you can set it with:
 ALTER USER postgres PASSWORD 'yourpassword';
 ```
 
-Keep the resulting connection details (user, password, host, port, db name)
-handy — you'll put them into the backend's `.env` in step 5.
+**2. Neo4j:**
+Download and install Neo4j Desktop or Neo4j Community Edition (version 5+).
+Start the server and ensure the Bolt port is accessible at `localhost:7687`. Set the default user `neo4j` and password to `password`.
+
+Keep your connection details handy — you'll put them into the backend's `.env` in step 4.3.
 
 ---
 
@@ -164,13 +184,17 @@ AVATAR_MAX_SIZE_MB=5.0
 
 ### 4.4 Run database migrations
 
+Initialize both PostgreSQL tables and Neo4j graph constraints/indexes:
+
 ```bash
+# 1. PostgreSQL migrations
 alembic upgrade head
+
+# 2. Neo4j graph migrations
+python app/db/run_migrations.py
 ```
 
-This creates the `users`, `refresh_tokens` tables and everything else the
-app needs. You should see `Running upgrade ... -> ..., <message>` lines
-with no errors.
+This creates the PostgreSQL tables (`users`, `refresh_tokens`, etc.) and the Neo4j unique constraints and indexes the app needs. You should see successful execution messages with no errors.
 
 ### 4.5 Start the backend
 

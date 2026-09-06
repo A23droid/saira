@@ -39,13 +39,28 @@ import {
   DialogFooter,
 } from "@/components/ui/dialog";
 
-import { getPaperById, getPaperProjects, getSimilarPapers, BackendPaper } from "@/lib/api/papers";
+import { CitationGraph } from "@/components/ui/citation-graph";
+import { ConceptGraph } from "@/components/ui/concept-graph";
+
+import { getPaperById, getPaperProjects, getSimilarPapers, getIndexingStatus, IndexingStatus, BackendPaper } from "@/lib/api/papers";
 import { getProjects, addPaperToProject, updateProjectPaper } from "@/lib/api/projects";
 import { getReadingData, createNote, deleteNote, createHighlight, deleteHighlight, updateReadingProgress, ProjectPaperReadingData } from "@/lib/api/reading_data";
 import { fetchPaperSummary, fetchPaperExtraction, calculatePRD, AISummaryResponse, AIExtractionResponse, PRDResponse, modelLabel } from "@/lib/api/ai";
 import { logHistoryEvent } from "@/lib/api/analytics";
 import { Project, Paper } from "@/lib/types";
-import { Loader2 } from "lucide-react";
+import { Loader2, Check } from "lucide-react";
+
+const IN_FLIGHT = new Set(["queued", "downloading_pdf", "indexing"]);
+
+const INDEXING_LABEL: Record<string, string> = {
+  not_indexed: "Not indexed",
+  queued: "Preparing paper for Ask AI…",
+  downloading_pdf: "Preparing PDF…",
+  indexing: "Indexing…",
+  indexed: "Ask AI ready",
+  pdf_unavailable: "PDF unavailable",
+  failed: "Indexing failed",
+};
 
 export default function PaperDetailsPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
@@ -84,6 +99,32 @@ export default function PaperDetailsPage({ params }: { params: Promise<{ id: str
   const [prdData, setPrdData] = useState<PRDResponse | null>(null);
   const [prdError, setPrdError] = useState<string | null>(null);
   
+  // Indexing state. Polled while in flight so "Ask AI ready" appears on its
+  // own — the user should never have to refresh to find out.
+  const [indexing, setIndexing] = useState<IndexingStatus | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    let timer: ReturnType<typeof setTimeout>;
+
+    const poll = async () => {
+      try {
+        const s = await getIndexingStatus(id);
+        if (!active) return;
+        setIndexing(s);
+        if (IN_FLIGHT.has(s.indexing_status)) timer = setTimeout(poll, 3000);
+      } catch {
+        /* transient: stop polling rather than spin on an error */
+      }
+    };
+    poll();
+    return () => { active = false; clearTimeout(timer); };
+  }, [id]);
+
+  const retryIndexing = async () => {
+    setIndexing(await getIndexingStatus(id, true));
+  };
+
   // Fetch Paper & Projects it belongs to
   useEffect(() => {
     let active = true;
@@ -298,6 +339,29 @@ export default function PaperDetailsPage({ params }: { params: Promise<{ id: str
           {paper.source}
         </Badge>
         
+        {/* Indexing status — drives whether Ask AI is offered at all */}
+        {indexing && (
+          <Badge
+            variant="outline"
+            className={`gap-1 ${
+              indexing.ask_ai_ready ? 'border-teal-200 bg-teal-50 text-teal-700' :
+              indexing.can_retry ? 'border-red-200 bg-red-50 text-red-700' :
+              'border-blue-200 bg-blue-50 text-blue-700'
+            }`}
+            title={indexing.indexing_error || undefined}
+          >
+            {indexing.ask_ai_ready && <Check className="h-3 w-3" />}
+            {indexing.can_retry && <AlertCircle className="h-3 w-3" />}
+            {IN_FLIGHT.has(indexing.indexing_status) && <Loader2 className="h-3 w-3 animate-spin" />}
+            {INDEXING_LABEL[indexing.indexing_status] ?? indexing.indexing_status}
+          </Badge>
+        )}
+        {indexing?.can_retry && (
+          <Button size="sm" variant="outline" className="h-6 text-xs" onClick={retryIndexing}>
+            Retry
+          </Button>
+        )}
+
         {paperProjects.length > 0 && (
           <div className="w-full sm:w-auto mt-2 sm:mt-0 sm:ml-auto flex items-center gap-2">
             <span className="text-sm text-ink-faint shrink-0">Project Context:</span>
@@ -396,7 +460,8 @@ export default function PaperDetailsPage({ params }: { params: Promise<{ id: str
               <TabsTrigger value="highlights">Highlights ({readingData?.highlights?.length || 0})</TabsTrigger>
               <TabsTrigger value="summary">AI summary</TabsTrigger>
               <TabsTrigger value="extracted">Extracted info</TabsTrigger>
-              <TabsTrigger value="prd">PRD (Delta)</TabsTrigger>
+              <TabsTrigger value="concepts">Concepts</TabsTrigger>
+              <TabsTrigger value="citation-graph">Citation Graph</TabsTrigger>
             </TabsList>
 
             <TabsContent value="notes">
@@ -652,17 +717,46 @@ export default function PaperDetailsPage({ params }: { params: Promise<{ id: str
               ) : null}
             </TabsContent>
 
+            <TabsContent value="concepts">
+              <ConceptGraph paperId={id} paperTitle={paper.title} />
+            </TabsContent>
+
+            <TabsContent value="citation-graph">
+              <CitationGraph paperId={id} paperTitle={paper.title} />
+            </TabsContent>
+
           </Tabs>
         </div>
 
         <div className="flex flex-col gap-6 lg:col-span-2">
           <div className="h-[420px]">
-            <AIChatPanel
-              initialMessages={[]}
-              paperId={id}
-              contextLabel={`Answering from "${paper.title.slice(0, 30)}${paper.title.length > 30 ? "…" : ""}"`}
-              placeholder="Ask a question about this paper…"
-            />
+            {indexing?.ask_ai_ready ? (
+              <AIChatPanel
+                initialMessages={[]}
+                paperId={id}
+                contextLabel={`Answering from "${paper.title.slice(0, 30)}${paper.title.length > 30 ? "…" : ""}"`}
+                placeholder="Ask a question about this paper…"
+              />
+            ) : (
+              // Never accept a question that retrieval cannot answer from this
+              // paper: no chunks exist until indexing succeeds.
+              <div className="flex h-full flex-col items-center justify-center gap-2 rounded-lg border border-dashed p-6 text-center text-sm text-ink-faint">
+                {IN_FLIGHT.has(indexing?.indexing_status ?? "") ? (
+                  <>
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                    <span>{INDEXING_LABEL[indexing!.indexing_status]} — Ask AI unlocks when this finishes.</span>
+                  </>
+                ) : (
+                  <>
+                    <AlertCircle className="h-4 w-4" />
+                    <span>Full text unavailable, so Ask AI cannot answer from this paper.</span>
+                    {indexing?.indexing_error && (
+                      <span className="text-xs opacity-70">{indexing.indexing_error}</span>
+                    )}
+                  </>
+                )}
+              </div>
+            )}
           </div>
 
           <div>

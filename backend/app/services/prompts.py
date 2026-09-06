@@ -35,6 +35,8 @@ def _build_paper_context(paper: Dict[str, Any], extra: str = "") -> str:
         lines.append(f"arXiv ID: {paper['arxiv_id']}")
     if paper.get("citation_count") is not None:
         lines.append(f"Citations: {paper['citation_count']}")
+    if paper.get("full_text_sample"):
+        lines.append(f"\n--- FULL TEXT SNIPPETS ---\n{paper['full_text_sample']}\n--------------------------\n")
     if extra:
         lines.append(f"\nAdditional context:\n{extra}")
     return "\n".join(lines)
@@ -70,8 +72,8 @@ def build_summary_messages(paper: Dict[str, Any]) -> List[Dict[str, str]]:
 
 # ── Q&A ────────────────────────────────────────────────────────────────────────
 
-def build_qa_messages(paper: Dict[str, Any], question: str, history: Optional[List[Dict[str, str]]] = None) -> List[Dict[str, str]]:
-    context = _build_paper_context(paper)
+def build_qa_messages(paper: Dict[str, Any], question: str, history: Optional[List[Dict[str, str]]] = None, extra_context: str = "") -> List[Dict[str, str]]:
+    context = _build_paper_context(paper, extra=extra_context)
     messages = [
         {
             "role": "system",
@@ -262,6 +264,82 @@ def build_extraction_messages(paper: Dict[str, Any]) -> List[Dict[str, str]]:
     ]
 
 
+# ── Concept Extraction ─────────────────────────────────────────────────────────
+
+#: Closed relationship vocabulary for the concept graph. Keeping this fixed is
+#: what stops the model inventing a new edge label per paper, which would make
+#: the graph unqueryable and every edge type a sample size of one.
+CONCEPT_RELATION_TYPES = [
+    "USES",            # method/system uses a component or technique
+    "PROPOSES",        # paper's contribution introduces this concept
+    "EVALUATED_ON",    # evaluated on a dataset/benchmark
+    "IMPROVES",        # outperforms / improves upon
+    "BASED_ON",        # builds on prior method
+    "PART_OF",         # component-of relationship
+    "COMPARED_TO",     # explicitly compared against
+    "MEASURED_BY",     # assessed with a metric
+]
+
+
+def build_concept_extraction_messages(paper: Dict[str, Any]) -> List[Dict[str, str]]:
+    """Extract concepts AND concept-to-concept relations, both with evidence.
+
+    Two things changed relative to the original prompt, both for correctness
+    rather than style:
+
+    1. Every concept must carry a verbatim `evidence` quote from the supplied
+       text. That gives each node provenance, and it makes a hallucinated
+       concept detectable — an invented term cannot be quoted from the source,
+       so the caller can drop concepts whose evidence is not present.
+    2. Relations are drawn from a closed vocabulary. Free-form edge labels
+       produced a different vocabulary for every paper, which is why the graph
+       could never be queried meaningfully.
+    """
+    context = _build_paper_context(paper)
+    rel_list = ", ".join(CONCEPT_RELATION_TYPES)
+    return [
+        {
+            "role": "system",
+            "content": (
+                "You are an expert academic research analyst building a knowledge graph. "
+                "Work ONLY from the supplied paper context. Never use outside knowledge.\n\n"
+                "Extract 5 to 15 specific, technically meaningful concepts (methods, "
+                "architectures, datasets, tasks, metrics, systems). Reject generic words "
+                "such as 'model', 'data', 'result', 'approach', 'paper', 'method', "
+                "'experiment' when they stand alone.\n\n"
+                "Then extract relationships BETWEEN those concepts, using ONLY these "
+                f"relation types: {rel_list}.\n"
+                "Only assert a relationship the text actually supports. Do NOT invent "
+                "edges to make the graph look connected. Returning few or no relations "
+                "is correct when the text does not state them.\n\n"
+                "Return a JSON object with EXACTLY this structure:\n"
+                "{\n"
+                '  "concepts": [\n'
+                '    {"name": "Self-Attention", "importance": 0.9, '
+                '"evidence": "<short verbatim quote from the context>"}\n'
+                "  ],\n"
+                '  "relations": [\n'
+                '    {"source": "Transformer", "target": "Self-Attention", '
+                '"type": "USES", "evidence": "<short verbatim quote>"}\n'
+                "  ]\n"
+                "}\n\n"
+                "Rules: 'name' is the concept as written in the paper, in singular form "
+                "where natural. 'importance' is a float 0.0-1.0. 'evidence' must be a "
+                "short quote copied verbatim from the supplied context. Every 'source' "
+                "and 'target' MUST exactly match a 'name' in your concepts list. "
+                "Do NOT output <think>, <analysis>, <reasoning> or <scratchpad> blocks."
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                f"--- PAPER CONTEXT ---\n{context}\n--- END CONTEXT ---\n\n"
+                "Extract concepts and their relationships. Return JSON only."
+            ),
+        },
+    ]
+
+
 # ── Project Chat (with structured citations) ───────────────────────────────────
 
 def build_project_chat_messages(
@@ -444,3 +522,82 @@ def build_lit_review_synthesis_messages(
             ),
         },
     ]
+
+
+# ── Unified scoped RAG (Paper Chat + Project Chat) ─────────────────────────────
+
+GROUNDING_SYSTEM_PROMPT = (
+    "You are SAIRA, a research assistant answering questions about scientific "
+    "papers.\n\n"
+    "GROUNDING POLICY — follow exactly:\n"
+    "1. Answer using ONLY the RETRIEVED EVIDENCE below. Do not use outside "
+    "knowledge, even if you are confident it is correct.\n"
+    "2. When the evidence supports an answer, give it directly and completely. "
+    "Do NOT refuse or hedge when the evidence is sufficient.\n"
+    "3. When the evidence is insufficient, say so explicitly and set "
+    '"abstained" to true. Partial evidence: answer what is supported and state '
+    "what is missing.\n"
+    "4. Every factual claim must cite the evidence_id it came from.\n"
+    "5. NEVER invent an evidence_id, page number, or paper. Cite only ids that "
+    "appear in the RETRIEVED EVIDENCE.\n"
+    "6. If the evidence contradicts your prior knowledge, follow the evidence.\n\n"
+    "Return a JSON object with EXACTLY these keys:\n"
+    "{\n"
+    '  "answer": "<your answer in plain text>",\n'
+    '  "citations": [{"evidence_id": "<exact id from the evidence>", '
+    '"claim": "<the specific claim this supports>"}],\n'
+    '  "grounded": true,\n'
+    '  "abstained": false\n'
+    "}\n"
+    "Do NOT output <think>, <analysis>, <reasoning> or <scratchpad> blocks."
+)
+
+
+def build_scoped_rag_messages(
+    question: str,
+    evidence_block: str,
+    scope_description: str,
+    history: Optional[List[Dict[str, str]]] = None,
+) -> List[Dict[str, str]]:
+    """Assemble the final payload for a scoped RAG answer.
+
+    The four parts the audit requires are kept in clearly separated,
+    individually labelled sections — system instructions, allowed conversation
+    history, retrieved evidence, user question — so that reading the logged
+    payload is enough to tell what influenced an answer. Evidence is placed in
+    the same user message as the question (not a prior turn) so it cannot be
+    mistaken for conversation history on a later turn.
+    """
+    messages: List[Dict[str, str]] = [
+        {"role": "system", "content": GROUNDING_SYSTEM_PROMPT}
+    ]
+
+    # Conversation history is passed verbatim and bounded by the caller. It is
+    # never summarized into the system prompt, which is how facts from an
+    # earlier answer used to re-enter as if they were evidence.
+    if history:
+        messages.extend(history)
+
+    if evidence_block.strip():
+        evidence_section = (
+            "--- RETRIEVED EVIDENCE ---\n"
+            f"{evidence_block}\n"
+            "--- END RETRIEVED EVIDENCE ---"
+        )
+    else:
+        evidence_section = (
+            "--- RETRIEVED EVIDENCE ---\n"
+            "(no evidence was retrieved for this question)\n"
+            "--- END RETRIEVED EVIDENCE ---"
+        )
+
+    messages.append({
+        "role": "user",
+        "content": (
+            f"SCOPE: {scope_description}\n\n"
+            f"{evidence_section}\n\n"
+            f"QUESTION: {question}\n\n"
+            "Answer using only the evidence above. Return JSON only."
+        ),
+    })
+    return messages

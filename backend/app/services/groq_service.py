@@ -57,9 +57,49 @@ def clean_model_response(text: str) -> str:
     return cleaned.strip()
 
 
+# Hard ceiling for the single budget retry below.
+_MAX_TOKEN_CEILING = 8192
+
+
 class GroqServiceError(Exception):
     """Raised for any error from the Groq service layer."""
     pass
+
+
+# ── Evaluation-mode payload logging ───────────────────────────────────────────
+
+def _log_llm_payload(
+    model: str,
+    messages: List[Dict[str, str]],
+    temperature: float,
+    max_tokens: int,
+) -> None:
+    """Log the exact messages sent to the model, immediately before the call.
+
+    Enabled only by SAIRA_LOG_LLM_PAYLOAD / SAIRA_EVAL_MODE. This is the single
+    point where the final payload can be observed, which is what makes claims
+    about "what the model actually saw" checkable rather than assumed.
+
+    Only the message array is logged — never the API key, which lives on the
+    client object and is never part of `messages`.
+    """
+    if not (settings.SAIRA_LOG_LLM_PAYLOAD or settings.SAIRA_EVAL_MODE):
+        return
+    try:
+        payload = {
+            "model": model,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "message_count": len(messages),
+            "total_chars": sum(len(m.get("content", "")) for m in messages),
+            "messages": [
+                {"role": m.get("role"), "content": m.get("content", "")}
+                for m in messages
+            ],
+        }
+        logger.info("LLM_PAYLOAD %s", json.dumps(payload, ensure_ascii=False))
+    except Exception as exc:  # never let debug logging break a request
+        logger.debug("Failed to log LLM payload: %s", exc)
 
 
 class GroqService:
@@ -94,6 +134,7 @@ class GroqService:
         messages: List[Dict[str, str]],
         temperature: float = 0.3,
         max_tokens: int = 2048,
+        _allow_budget_retry: bool = True,
     ) -> str:
         """
         Send a chat completion request to Groq.
@@ -105,6 +146,7 @@ class GroqService:
             GroqServiceError: On API errors, rate limits, timeouts, or config issues.
         """
         client = self._get_client()
+        _log_llm_payload(model, messages, temperature, max_tokens)
         try:
             response = await client.chat.completions.create(
                 model=model,
@@ -112,9 +154,47 @@ class GroqService:
                 temperature=temperature,
                 max_tokens=max_tokens,
             )
-            content = response.choices[0].message.content
+            choice = response.choices[0]
+            content = choice.message.content
+            finish_reason = getattr(choice, "finish_reason", None)
+
             if not content:
-                raise GroqServiceError("Groq returned an empty response.")
+                # `openai/gpt-oss-120b` is a reasoning model: its chain of
+                # thought is billed against max_tokens and returned in a
+                # separate `reasoning` field. If the budget is exhausted while
+                # still reasoning, the API returns finish_reason="length" with
+                # an EMPTY content string — a successful HTTP 200 that carries
+                # no answer. Reporting that as a bare "empty response" hid the
+                # cause, so distinguish it and say what to do about it.
+                if finish_reason == "length":
+                    reasoning = getattr(choice.message, "reasoning", None) or ""
+                    # Retry once with a doubled budget. Bounded to a single
+                    # extra attempt so a pathological prompt fails loudly
+                    # instead of looping and burning quota.
+                    if _allow_budget_retry and max_tokens < _MAX_TOKEN_CEILING:
+                        retry_budget = min(max_tokens * 2, _MAX_TOKEN_CEILING)
+                        logger.warning(
+                            "Empty content (finish_reason=length, reasoning_chars=%d); "
+                            "retrying once with max_tokens=%d",
+                            len(reasoning), retry_budget,
+                        )
+                        return await self.chat_complete(
+                            model=model,
+                            messages=messages,
+                            temperature=temperature,
+                            max_tokens=retry_budget,
+                            _allow_budget_retry=False,
+                        )
+                    raise GroqServiceError(
+                        "Model exhausted its token budget while reasoning and "
+                        f"returned no answer (finish_reason=length, "
+                        f"max_tokens={max_tokens}, reasoning_chars={len(reasoning)}). "
+                        "Raise max_tokens for this task."
+                    )
+                raise GroqServiceError(
+                    f"Groq returned an empty response (finish_reason={finish_reason!r})."
+                )
+
             # ── Sanitize at the provider boundary ──────────────────────────────
             # Remove any <think>/<analysis>/etc. blocks before the content
             # ever leaves this service. The AI Router and all callers above
@@ -125,6 +205,16 @@ class GroqService:
         except Exception as exc:
             exc_str = str(exc)
             if "429" in exc_str or "rate_limit" in exc_str.lower():
+                # Distinguish the per-minute ceiling (wait and retry) from the
+                # per-day quota (retrying is futile until the window rolls).
+                # Collapsing both into one message made an exhausted daily
+                # budget look like transient throttling.
+                if "per day" in exc_str.lower() or "tpd" in exc_str.lower():
+                    raise GroqServiceError(
+                        "Groq daily token quota (TPD) exhausted for this "
+                        f"account. Retrying will not help until it resets. "
+                        f"Provider detail: {exc_str[:300]}"
+                    ) from exc
                 raise GroqServiceError(
                     "Groq rate limit reached. Please wait and try again."
                 ) from exc
@@ -144,7 +234,7 @@ class GroqService:
         model: str,
         messages: List[Dict[str, str]],
         temperature: float = 0.2,
-        max_tokens: int = 2048,
+        max_tokens: int = 4096,
     ) -> Dict[str, Any]:
         """
         Like chat_complete but expects JSON output and parses + validates it.

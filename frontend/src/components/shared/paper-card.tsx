@@ -1,5 +1,6 @@
 "use client";
 
+import type { ReactNode } from "react";
 import Link from "next/link";
 import { motion } from "framer-motion";
 import { BookmarkPlus, Quote, FileCheck2, Flame, Star, Layers } from "lucide-react";
@@ -25,6 +26,7 @@ export function PaperCard({
   favorited,
   onOpen,
   onAddToCollection,
+  statusSlot,
 }: {
   paper: Paper;
   onSave?: (paper: Paper) => void;
@@ -39,6 +41,8 @@ export function PaperCard({
   onOpen?: (paper: Paper) => void;
   onFavorite?: (paper: Paper) => void;
   favorited?: boolean;
+  /** Rendered under the metadata line — used to show live indexing progress after saving. */
+  statusSlot?: ReactNode;
 }) {
   return (
     <motion.div
@@ -92,6 +96,8 @@ export function PaperCard({
             </Badge>
           ))}
         </div>
+
+        {statusSlot}
 
         <div className="mt-1 flex items-center justify-between border-t border-line-soft pt-3">
           <div className="flex items-center gap-4 text-xs text-ink-faint">

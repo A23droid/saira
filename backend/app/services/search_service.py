@@ -15,8 +15,14 @@ from app.services.openalex_client import openalex_client
 from app.services.arxiv_client import arxiv_client
 from app.services.semantic_scholar_client import semantic_scholar_client
 from app.services.pdf_validator import pdf_validator
+from app.db.neo4j_client import neo4j_client
+from app.services.neo4j_service import neo4j_service
 
 logger = logging.getLogger(__name__)
+
+# Strong references to background tasks, so they are not garbage collected
+# mid-flight. Entries are discarded by each task's done-callback.
+_BACKGROUND_TASKS: set = set()
 
 SearchSource = Literal["openalex", "arxiv", "semantic_scholar", "all"]
 MAX_CANDIDATE_PAGES = 5
@@ -268,6 +274,19 @@ class SearchService:
         candidates = []
         semaphore = asyncio.Semaphore(CONCURRENCY_LIMIT)
 
+        # 0. Neo4j Graph Candidates
+        try:
+            neo_sess = await neo4j_client.get_session()
+            async with neo_sess:
+                graph_candidates = await neo4j_service.get_similar_candidates(neo_sess, str(paper.id), limit=limit*2)
+                for c in graph_candidates:
+                    c["provider"] = "neo4j_graph"
+                    candidates.append(c)
+                if graph_candidates:
+                    logger.info(f"Neo4j graph candidates: found {len(graph_candidates)}")
+        except Exception as e:
+            logger.error(f"Failed to fetch Neo4j graph candidates: {e}")
+
         # 1. Semantic Scholar Fallback Chain
         s2_identifier = None
         if paper.semantic_scholar_id:
@@ -450,15 +469,51 @@ class SearchService:
             db_paper = await session.scalar(stmt)
 
         if not db_paper:
-            # If no valid PDF and not in DB, we should arguably reject ingestion from external source,
-            # but user requirement says: "Before ingesting an externally discovered paper, ensure its PDF source has been validated... This prevents invalid papers from entering the system".
-            if not valid_pdf:
-                raise ValueError("Cannot ingest paper: No accessible PDF source found.")
-            
             db_paper = Paper(**normalized.model_dump())
+            if not valid_pdf:
+                # A paper with no reachable PDF is still worth having as
+                # metadata — it just cannot support full-text Ask AI. Saying so
+                # in the status beats refusing the save and losing the paper.
+                db_paper.indexing_status = "pdf_unavailable"
+                db_paper.indexing_error = "No accessible PDF source found."
             session.add(db_paper)
             await session.commit()
             await session.refresh(db_paper)
+
+        async def _sync_to_neo4j(p_dict):
+            try:
+                neo_sess = await neo4j_client.get_session()
+                async with neo_sess:
+                    await neo4j_service.upsert_paper(neo_sess, p_dict)
+            except Exception as e:
+                logger.error(f"Failed to sync paper {p_dict.get('id')} to Neo4j: {e}")
+
+        paper_dict = {
+            "id": str(db_paper.id),
+            "doi": db_paper.doi,
+            "arxiv_id": db_paper.arxiv_id,
+            "semantic_scholar_id": db_paper.semantic_scholar_id,
+            "title": db_paper.title,
+            "publication_year": db_paper.publication_year,
+            "venue": db_paper.venue,
+            "citation_count": db_paper.citation_count,
+        }
+        # asyncio holds only a weak reference to a running task, so a
+        # fire-and-forget `create_task` can be collected before it does any
+        # work. Keep a strong reference until it completes.
+        task = asyncio.create_task(_sync_to_neo4j(paper_dict))
+        _BACKGROUND_TASKS.add(task)
+        task.add_done_callback(_BACKGROUND_TASKS.discard)
+
+        # Indexing is started here, awaited, rather than nested inside that
+        # task: `ensure_indexed` returns as soon as the job is queued (it owns
+        # both the dedup guard and a strong reference to the running job), so
+        # this does not block the request on a PDF download — but it does
+        # guarantee the job is actually started before the response is sent.
+        if db_paper.pdf_url or db_paper.indexing_status not in ("pdf_unavailable",):
+            from app.services.indexing_jobs import ensure_indexed
+
+            await ensure_indexed(db_paper.id)
 
         # Optionally add to project (idempotent)
         project_paper = None

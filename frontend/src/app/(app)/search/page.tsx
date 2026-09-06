@@ -22,6 +22,7 @@ import { Project, Paper, PaperSource } from "@/lib/types";
 import toast from "react-hot-toast";
 import { getProjects, updateProjectPaper } from "@/lib/api/projects";
 import { searchPapersExternal, ingestPaper, OpenAlexSearchResult, SearchSource } from "@/lib/api/search";
+import { getIndexingStatus, IndexingStatus } from "@/lib/api/papers";
 import { getCollections, addPaperToCollection, Collection } from "@/lib/api/collections";
 import { logHistoryEvent } from "@/lib/api/analytics";
 
@@ -37,6 +38,18 @@ const suggestions = [
   "chain-of-thought reasoning",
   "diffusion models",
 ];
+
+const IN_FLIGHT = new Set(["queued", "downloading_pdf", "indexing"]);
+
+const INDEXING_LABEL: Record<string, string> = {
+  queued: "Preparing paper for Ask AI…",
+  downloading_pdf: "Preparing PDF…",
+  indexing: "Indexing…",
+  indexed: "Ask AI ready",
+  pdf_unavailable: "PDF unavailable — saved as metadata only",
+  failed: "Indexing failed",
+  not_indexed: "Not indexed",
+};
 
 function mapToUIPaper(r: OpenAlexSearchResult): Paper & { _raw: OpenAlexSearchResult; ui_id: string } {
   const ui_id = r.local_id || r.openalex_id || r.arxiv_id || r.semantic_scholar_id || r.doi || r.title || Math.random().toString();
@@ -79,6 +92,9 @@ export default function SearchPapersPage() {
   const [page, setPage] = useState(1);
   const [sortBy, setSortBy] = useState<string>("relevance");
   const [savedIds, setSavedIds] = useState<Set<string>>(new Set());
+  // Indexing progress per saved result card, keyed by ui_id, so the user can
+  // watch a paper become Ask-AI-ready without leaving the search page.
+  const [indexing, setIndexing] = useState<Record<string, IndexingStatus>>({});
   const [searchResults, setSearchResults] = useState<(Paper & { _raw: OpenAlexSearchResult; ui_id: string })[]>([]);
   const [isSearching, setIsSearching] = useState(false);
   const [isOpening, setIsOpening] = useState(false);
@@ -164,6 +180,20 @@ export default function SearchPapersPage() {
     }
   };
 
+  /** Poll one paper until it leaves an in-flight state. */
+  const trackIndexing = (uiId: string, paperId: string) => {
+    const tick = async () => {
+      try {
+        const st = await getIndexingStatus(paperId);
+        setIndexing((prev) => ({ ...prev, [uiId]: st }));
+        if (IN_FLIGHT.has(st.indexing_status)) setTimeout(tick, 3000);
+      } catch {
+        /* transient: stop polling rather than spin on an error */
+      }
+    };
+    tick();
+  };
+
   const handleSaveToProject = async () => {
     if (!pickerPaper || !pickerPaper._raw || !selectedProjectIdForSave) return;
 
@@ -184,7 +214,9 @@ export default function SearchPapersPage() {
       }
       setSavedIds((prev) => new Set(prev).add(pickerPaper.ui_id));
       toast.success("Paper saved to your library");
-      router.push(`/papers/${res.paper.id}`);
+      // Stay here and show ingestion progress on the card. Navigating away used
+      // to hide which action actually started indexing.
+      trackIndexing(pickerPaper.ui_id, res.paper.id);
     } catch (err) {
       console.error("Failed to save paper:", err);
       toast.error("Failed to save paper");
@@ -310,6 +342,26 @@ export default function SearchPapersPage() {
                 key={p.ui_id}
                 paper={p}
                 saved={savedIds.has(p.ui_id)}
+                statusSlot={
+                  indexing[p.ui_id] ? (
+                    <div
+                      className={`flex items-center gap-1.5 text-xs ${
+                        indexing[p.ui_id].ask_ai_ready
+                          ? "text-teal-700"
+                          : indexing[p.ui_id].can_retry
+                            ? "text-red-600"
+                            : "text-ink-faint"
+                      }`}
+                      title={indexing[p.ui_id].indexing_error || undefined}
+                    >
+                      {IN_FLIGHT.has(indexing[p.ui_id].indexing_status) && (
+                        <Loader2 className="h-3 w-3 animate-spin" />
+                      )}
+                      {INDEXING_LABEL[indexing[p.ui_id].indexing_status] ??
+                        indexing[p.ui_id].indexing_status}
+                    </div>
+                  ) : undefined
+                }
                 onFavorite={() => {
                   setSaveAction("favorite");
                   setPickerPaper(p);

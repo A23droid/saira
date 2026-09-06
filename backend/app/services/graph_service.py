@@ -58,7 +58,64 @@ class GraphService:
             
         return {"nodes": nodes, "edges": edges}
 
-    async def get_project_concept_graph(self, session: AsyncSession, project_id: uuid.UUID) -> ConceptGraphData:
+    async def get_project_concept_graph_from_neo4j(
+        self, session: AsyncSession, project_id: uuid.UUID
+    ) -> ConceptGraphData:
+        """Build the project concept graph from the actual concept pipeline.
+
+        The previous implementation read `paper_analyses`, a table the concept
+        pipeline never writes (and which held zero rows in production), so the
+        project graph rendered papers with no concepts attached no matter what
+        was extracted. This reads the same Neo4j subgraph the per-paper view
+        uses, scoped to the project's papers.
+        """
+        from app.db.neo4j_client import neo4j_client
+        from app.services.neo4j_service import neo4j_service
+
+        stmt = select(ProjectPaper.paper_id).where(ProjectPaper.project_id == project_id)
+        rows = await session.execute(stmt)
+        paper_ids = [str(r[0]) for r in rows]
+        if not paper_ids:
+            return {"nodes": [], "edges": []}
+
+        neo_sess = await neo4j_client.get_session()
+        async with neo_sess:
+            data = await neo4j_service.get_project_concept_graph(neo_sess, paper_ids)
+
+        nodes: list[dict] = []
+        edges: list[dict] = []
+
+        titles = {p["id"]: p.get("title") for p in data.get("papers", [])}
+        for pid in paper_ids:
+            label = titles.get(pid) or "Untitled paper"
+            nodes.append({
+                "id": pid,
+                "label": label[:60] + ("..." if len(label) > 60 else ""),
+                "type": "paper",
+            })
+
+        concept_ids = set()
+        for c in data.get("concepts", []):
+            concept_ids.add(c["id"])
+            nodes.append({"id": c["id"], "label": c.get("name") or "", "type": "concept"})
+            for pid in (c.get("paper_ids") or []):
+                if pid in titles:
+                    edges.append({"source": pid, "target": c["id"], "label": "discusses"})
+
+        for r in data.get("relations", []):
+            # Both endpoints are guaranteed in-project by the query, but drop
+            # anything that did not make it into the node list so the frontend
+            # never receives an edge pointing at a node it wasn't given.
+            if r["source"] in concept_ids and r["target"] in concept_ids:
+                edges.append({
+                    "source": r["source"],
+                    "target": r["target"],
+                    "label": (r.get("type") or "RELATES_TO").lower(),
+                })
+
+        return {"nodes": nodes, "edges": edges}
+
+    async def get_project_concept_graph_legacy(self, session: AsyncSession, project_id: uuid.UUID) -> ConceptGraphData:
         # 1. Fetch all project papers with their analysis
         stmt = (
             select(Paper)
@@ -132,5 +189,23 @@ class GraphService:
                     add_concepts(list(a.glossary.keys()), "concept", "discusses")
                 
         return {"nodes": nodes, "edges": edges}
+
+    async def get_project_concept_graph(self, session: AsyncSession, project_id: uuid.UUID) -> ConceptGraphData:
+        """Project concept graph, sourced from Neo4j.
+
+        Falls back to the legacy PaperAnalysis-derived graph only if Neo4j is
+        unreachable, so a graph-store outage degrades to whatever analysis data
+        exists rather than returning a hard error to the UI.
+        """
+        try:
+            return await self.get_project_concept_graph_from_neo4j(session, project_id)
+        except Exception as exc:
+            import logging
+            logging.getLogger(__name__).error(
+                "Neo4j concept graph failed for project %s (%s); falling back to analysis data",
+                project_id, exc,
+            )
+            return await self.get_project_concept_graph_legacy(session, project_id)
+
 
 graph_service = GraphService()

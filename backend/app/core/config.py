@@ -42,6 +42,11 @@ class Settings(BaseSettings):
     DB_POOL_SIZE: int = 5
     DB_MAX_OVERFLOW: int = 10
 
+    # --- Neo4j Graph Database --------------------------------------------
+    NEO4J_URI: str = "bolt://localhost:7687"
+    NEO4J_USER: str = "neo4j"
+    NEO4J_PASSWORD: str = "password"
+
     # --- JWT ---------------------------------------------------------------
     JWT_SECRET_KEY: str = "CHANGE_ME_IN_PRODUCTION"
     JWT_ALGORITHM: str = "HS256"
@@ -120,6 +125,31 @@ class Settings(BaseSettings):
     GROQ_PRIMARY_MODEL: str = "openai/gpt-oss-120b"
     # Extraction model: used for structured dataset/model/algorithm/metrics extraction
     GROQ_EXTRACTION_MODEL: str = "openai/gpt-oss-120b"
+
+    # --- Retrieval (RAG) ---------------------------------------------------
+    # Central knobs for the shared retrieval layer. These are correctness
+    # bounds, not tuning parameters — they cap how much evidence can reach the
+    # model so a long project can't silently blow the context window.
+    RAG_TOP_K_PAPER: int = 5
+    RAG_TOP_K_PROJECT: int = 10
+    RAG_MAX_CHUNK_CHARS: int = 2000
+    RAG_MAX_CONTEXT_CHARS: int = 12000
+    RAG_MAX_HISTORY_MESSAGES: int = 6
+
+    # --- Evaluation mode ---------------------------------------------------
+    # Set SAIRA_EVAL_MODE=true only for evaluation/debug runs. It disables
+    # every caching / memory path that could let a previous request influence
+    # the current one, and enables structured logging of the exact payload
+    # sent to the model. It never changes retrieval scope or model choice.
+    SAIRA_EVAL_MODE: bool = False
+    # Logs the final LLM messages (never the API key) at INFO level.
+    SAIRA_LOG_LLM_PAYLOAD: bool = False
+    # Directory for JSONL debug traces written during evaluation runs.
+    SAIRA_TRACE_DIR: str = "evaluation/reports/traces"
+
+    @property
+    def eval_mode(self) -> bool:
+        return self.SAIRA_EVAL_MODE
 
     @field_validator("JWT_SECRET_KEY", "SESSION_SECRET_KEY")
     @classmethod

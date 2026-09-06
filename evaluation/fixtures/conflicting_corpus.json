@@ -1,0 +1,67 @@
+{
+  "_comment": "Synthetic documents with deliberately conflicting facts. Used ONLY by the controlled context-influence regression test. Never ingested; passed directly as evidence overrides. See README.md in this directory.",
+  "documents": {
+    "DOC_A": {
+      "paper_id": "fixture-doc-a",
+      "title": "Sequence Modeling with Recurrent Encoders (synthetic fixture A)",
+      "chunks": [
+        {
+          "chunk_id": "fixture-doc-a_chunk_0",
+          "page": 3,
+          "text": "We train all models using the Adam optimizer with a learning rate of 0.0003 and a batch size of 64. Training runs for 12 epochs on a single GPU. We use a dropout rate of 0.1 applied to the output of each sub-layer."
+        },
+        {
+          "chunk_id": "fixture-doc-a_chunk_1",
+          "page": 5,
+          "text": "Our encoder consists of 6 stacked recurrent layers with a hidden dimension of 512. We evaluate on the WMT 2014 English-to-German task and report a BLEU score of 27.3 on the newstest2014 test set."
+        }
+      ]
+    },
+    "DOC_B": {
+      "paper_id": "fixture-doc-b",
+      "title": "Convolutional Sequence Transduction (synthetic fixture B)",
+      "chunks": [
+        {
+          "chunk_id": "fixture-doc-b_chunk_0",
+          "page": 4,
+          "text": "All models are optimized using SGD with Nesterov momentum, a learning rate of 0.25 and a batch size of 128. Training proceeds for 40 epochs across 8 GPUs. We apply a dropout rate of 0.2 throughout the network."
+        },
+        {
+          "chunk_id": "fixture-doc-b_chunk_1",
+          "page": 6,
+          "text": "The convolutional encoder uses 15 layers with a hidden dimension of 768. Evaluated on the IWSLT 2015 English-to-Vietnamese task, our system attains a BLEU score of 31.9 on the official test split."
+        }
+      ]
+    }
+  },
+  "questions": [
+    {
+      "question": "Which optimizer was used to train the models?",
+      "answer_a": "Adam",
+      "answer_b": "SGD",
+      "chunk_a": "fixture-doc-a_chunk_0",
+      "chunk_b": "fixture-doc-b_chunk_0"
+    },
+    {
+      "question": "What learning rate was used?",
+      "answer_a": "0.0003",
+      "answer_b": "0.25",
+      "chunk_a": "fixture-doc-a_chunk_0",
+      "chunk_b": "fixture-doc-b_chunk_0"
+    },
+    {
+      "question": "How many encoder layers does the model have?",
+      "answer_a": "6",
+      "answer_b": "15",
+      "chunk_a": "fixture-doc-a_chunk_1",
+      "chunk_b": "fixture-doc-b_chunk_1"
+    },
+    {
+      "question": "What BLEU score is reported?",
+      "answer_a": "27.3",
+      "answer_b": "31.9",
+      "chunk_a": "fixture-doc-a_chunk_1",
+      "chunk_b": "fixture-doc-b_chunk_1"
+    }
+  ]
+}

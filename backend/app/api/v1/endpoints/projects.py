@@ -1,3 +1,4 @@
+import logging
 import uuid
 from typing import Any
 
@@ -32,6 +33,9 @@ from app.services.project_service import project_service
 from app.services.paper_service import paper_service
 from app.services.reading_data_service import reading_data_service
 from app.services.graph_service import graph_service
+from app.services.indexing_jobs import ensure_indexed, is_ask_ai_ready
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -153,7 +157,24 @@ async def add_paper_to_project(
     if existing:
         raise HTTPException(status_code=400, detail="Paper already added to project")
 
-    return await project_service.add_paper_to_project(session=db, project_id=project_id, project_paper_in=project_paper_in)
+    project_paper = await project_service.add_paper_to_project(
+        session=db, project_id=project_id, project_paper_in=project_paper_in
+    )
+    logger.info(
+        "paper_added_to_project paper_id=%s project_id=%s user_id=%s",
+        paper.id, project_id, current_user.id,
+    )
+
+    # Adding a paper is what makes its full text worth having, so ingestion
+    # starts here rather than waiting for someone to open the paper. It is
+    # deduplicated and runs in the background: the HTTP response must not wait
+    # on a PDF download, and must not claim the paper is ready.
+    status_now = await ensure_indexed(paper.id)
+
+    response = ProjectPaperResponse.model_validate(project_paper)
+    response.indexing_status = status_now
+    response.ask_ai_ready = is_ask_ai_ready(status_now)
+    return response
 
 
 @router.patch("/{project_id}/papers/{paper_id}", response_model=ProjectPaperResponse)

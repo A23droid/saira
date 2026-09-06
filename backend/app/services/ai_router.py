@@ -71,6 +71,13 @@ def _get_routing_table() -> Dict[AITask, str]:
         AITask.PROJECT_CHAT:    settings.GROQ_PRIMARY_MODEL,
         AITask.LIT_REVIEW_PAPER: settings.GROQ_EXTRACTION_MODEL,
         AITask.LIT_REVIEW_SYNTHESIS: settings.GROQ_PRIMARY_MODEL,
+        # Unified scoped RAG (Paper Chat + Project Chat)
+        AITask.SCOPED_RAG:     settings.GROQ_PRIMARY_MODEL,
+        # Knowledge-graph extraction. Previously the concept service bypassed
+        # this table with a hardcoded `llama3-70b-8192`, which Groq
+        # decommissioned — every extraction 400'd and the concept graph stayed
+        # empty. Routing it here means it can never silently diverge again.
+        AITask.CONCEPT_EXTRACTION: settings.GROQ_EXTRACTION_MODEL,
         # Extraction model: structured information extraction
         AITask.DATASET:        settings.GROQ_EXTRACTION_MODEL,
         AITask.MODELS:         settings.GROQ_EXTRACTION_MODEL,
@@ -88,6 +95,12 @@ def _model_for(task: AITask) -> str:
     if not model:
         raise GroqServiceError(f"No model configured for task: {task}")
     return model
+
+
+def concept_extraction_model() -> str:
+    """Model used for concept-graph extraction. Exposed so `concept_service`
+    reads the routing table instead of naming a model itself."""
+    return _model_for(AITask.CONCEPT_EXTRACTION)
 
 
 # ── AI Router ──────────────────────────────────────────────────────────────────
@@ -120,12 +133,60 @@ class AIRouter:
             raise GroqServiceError(f"Summary generation failed: {exc}") from exc
 
     async def answer_question(self, paper: Dict[str, Any], question: str, history: Optional[List[Dict[str, str]]] = None) -> AIQAResponse:
-        """Answer a question about a paper using the primary model."""
+        """Answer a question about a paper using the primary model and RAG context."""
         model = _model_for(AITask.QA)
-        messages = build_qa_messages(paper, question, history)
-        # groq_service.chat_complete already strips <think>/reasoning blocks
+        
+        # RAG context budget constants
+        MAX_CHUNK_CHARS = 2000
+        MAX_TOTAL_CONTEXT_CHARS = 10000
+        MAX_HISTORY_MESSAGES = 4
+
+        # limit history
+        if history and len(history) > MAX_HISTORY_MESSAGES:
+            history = history[-MAX_HISTORY_MESSAGES:]
+            
+        # 1. Embed question and retrieve chunks
+        from app.services.embedding_service import embedding_service
+        from app.services.neo4j_service import neo4j_service
+        from app.db.neo4j_client import neo4j_client
+        import asyncio
+        import json
+        
+        query_embedding = await asyncio.to_thread(embedding_service.embed_text, question)
+        
+        chunks_text = ""
+        retrieved_count = 0
+        try:
+            neo_sess = await neo4j_client.get_session()
+            async with neo_sess:
+                chunks = await neo4j_service.get_relevant_chunks(neo_sess, str(paper["id"]), query_embedding, top_k=5)
+                if chunks:
+                    retrieved_count = len(chunks)
+                    processed_chunks = []
+                    current_chars = 0
+                    for c in chunks:
+                        text = c['text'][:MAX_CHUNK_CHARS]
+                        chunk_str = f"[Page {c['page']}] {text}"
+                        if current_chars + len(chunk_str) > MAX_TOTAL_CONTEXT_CHARS:
+                            break
+                        processed_chunks.append(chunk_str)
+                        current_chars += len(chunk_str)
+                        
+                    chunks_text = "\n\n".join(processed_chunks)
+        except Exception as e:
+            logger.warning(f"Failed to retrieve chunks for QA: {e}")
+            
+        extra_context = ""
+        if chunks_text:
+            extra_context = f"--- RETRIEVED PDF SNIPPETS ---\n{chunks_text}\n------------------------------"
+            
+        messages = build_qa_messages(paper, question, history, extra_context=extra_context)
+        
+        # Log payload metrics before calling groq
+        request_size = sum(len(m.get("content", "")) for m in messages)
+        logger.info(f"RAG Request - Chunks: {retrieved_count} | Extra Context Chars: {len(extra_context)} | History Msgs: {len(history) if history else 0} | Est. Request Size (chars): {request_size}")
+        
         raw = await groq_service.chat_complete(model, messages)
-        # Parse the GROUNDED: true/false marker from the end of the cleaned response
         grounded = True
         answer = raw
         lines = raw.splitlines()
@@ -136,10 +197,64 @@ class AIRouter:
                 answer = "\n".join(lines[:-1]).strip()
         return AIQAResponse(answer=answer, grounded=grounded, model=model)
 
-    async def project_answer_question(self, project_context: str, question: str, history: Optional[List[Dict[str, str]]] = None) -> AIQAResponse:
-        """Answer a question about a project using the primary model."""
+    async def project_answer_question(self, project_context: str, question: str, paper_ids: List[str], history: Optional[List[Dict[str, str]]] = None) -> AIQAResponse:
+        """Answer a question about a project using the primary model and RAG context."""
         model = _model_for(AITask.QA)
+        
+        # RAG context budget constants
+        MAX_CHUNK_CHARS = 2000
+        MAX_TOTAL_CONTEXT_CHARS = 10000
+        MAX_HISTORY_MESSAGES = 4
+
+        # limit history
+        if history and len(history) > MAX_HISTORY_MESSAGES:
+            history = history[-MAX_HISTORY_MESSAGES:]
+            
+        # 1. Embed question and retrieve chunks
+        from app.services.embedding_service import embedding_service
+        from app.services.neo4j_service import neo4j_service
+        from app.db.neo4j_client import neo4j_client
+        import asyncio
+        import json
+        
+        query_embedding = await asyncio.to_thread(embedding_service.embed_text, question)
+        
+        chunks_text = ""
+        retrieved_count = 0
+        try:
+            neo_sess = await neo4j_client.get_session()
+            async with neo_sess:
+                chunks = await neo4j_service.get_project_relevant_chunks(neo_sess, paper_ids, query_embedding, top_k=6)
+                if chunks:
+                    retrieved_count = len(chunks)
+                    processed_chunks = []
+                    current_chars = 0
+                    for c in chunks:
+                        text = c['text'][:MAX_CHUNK_CHARS]
+                        chunk_str = f"[Paper {c['paper_id']}, Page {c['page']}] {text}"
+                        if current_chars + len(chunk_str) > MAX_TOTAL_CONTEXT_CHARS:
+                            break
+                        processed_chunks.append(chunk_str)
+                        current_chars += len(chunk_str)
+                        
+                    chunks_text = "\n\n".join(processed_chunks)
+        except Exception as e:
+            logger.warning(f"Failed to retrieve chunks for Project QA: {e}")
+            
+        extra_context = ""
+        if chunks_text:
+            extra_context = f"--- RETRIEVED PDF SNIPPETS ---\n{chunks_text}\n------------------------------"
+            
+        # We append extra context to the project context string
+        if extra_context:
+            project_context = f"{project_context}\n\n{extra_context}"
+            
         messages = build_project_qa_messages(project_context, question, history)
+        
+        # Log payload metrics before calling groq
+        request_size = sum(len(m.get("content", "")) for m in messages)
+        logger.info(f"Project RAG Request - Chunks: {retrieved_count} | Extra Context Chars: {len(extra_context)} | History Msgs: {len(history) if history else 0} | Est. Request Size (chars): {request_size}")
+        
         raw = await groq_service.chat_complete(model, messages)
         grounded = True
         answer = raw
@@ -340,3 +455,154 @@ class AIRouter:
 
 # Module-level singleton — imported by the AI endpoint
 ai_router = AIRouter()
+
+
+# ── Unified scoped RAG ─────────────────────────────────────────────────────────
+
+async def answer_scoped(
+    scope: "RetrievalScope",
+    question: str,
+    retrieval: "RetrievalResult",
+    history: Optional[List[Dict[str, str]]] = None,
+    include_evidence_text: bool = False,
+    evidence_override: Optional[str] = None,
+    evidence_chunks: Optional[List["RetrievedChunk"]] = None,
+) -> "ScopedAnswer":
+    """Generate a grounded, cited answer from already-retrieved evidence.
+
+    Paper Chat and Project Chat both land here; the only difference between
+    them is the `scope` that produced `retrieval`. Keeping generation separate
+    from retrieval is also what makes the causal evaluation possible — the
+    harness can hand this function deliberately wrong or perturbed evidence
+    via `evidence_override` and observe whether the answer follows it.
+
+    Citations are resolved against the evidence actually sent to the model, so
+    an `evidence_id` the model invents is dropped rather than returned. A
+    citation therefore always points at a real chunk on a real page.
+    """
+    import json
+    import re
+    import time
+
+    from app.schemas.ai import (
+        ChatCitation, EvidenceRef, RetrievalDebug, ScopedAnswer,
+    )
+    from app.services.prompts import build_scoped_rag_messages
+    from app.services.retrieval_service import retrieval_service
+
+    model = _model_for(AITask.SCOPED_RAG)
+
+    # Bound history centrally so no caller can pass an unbounded transcript.
+    if history and len(history) > settings.RAG_MAX_HISTORY_MESSAGES:
+        history = history[-settings.RAG_MAX_HISTORY_MESSAGES:]
+
+    if evidence_override is not None:
+        # Evaluation path: caller supplies the evidence block verbatim.
+        evidence_block = evidence_override
+        if evidence_chunks is not None:
+            used_chunks = list(evidence_chunks)
+        else:
+            # Derive the supplied set from the block itself. Carrying the
+            # original retrieval over would be wrong: under the no-context test
+            # the block is empty, yet a citation to a chunk the model never saw
+            # would still validate — exactly the failure the validator exists
+            # to catch.
+            supplied_ids = set(re.findall(r"evidence_id=([^\s|\]]+)", evidence_block))
+            used_chunks = [c for c in retrieval.chunks if c.chunk_id in supplied_ids]
+    else:
+        evidence_block, used_chunks = retrieval_service.build_evidence_block(retrieval)
+
+    scope_description = (
+        f"{scope.type} '{scope.label}' "
+        f"({len(scope.paper_ids)} paper(s) in scope)"
+    )
+    messages = build_scoped_rag_messages(
+        question=question,
+        evidence_block=evidence_block,
+        scope_description=scope_description,
+        history=history,
+    )
+    prompt_chars = sum(len(m.get("content", "")) for m in messages)
+
+    started = time.perf_counter()
+    try:
+        data = await groq_service.chat_complete_json(model, messages, max_tokens=4096)
+    except GroqServiceError:
+        raise
+    except Exception as exc:
+        raise GroqServiceError(f"Scoped RAG generation failed: {exc}") from exc
+    latency_ms = (time.perf_counter() - started) * 1000.0
+
+    answer = str(data.get("answer") or "").strip()
+    grounded = bool(data.get("grounded", True))
+    abstained = bool(data.get("abstained", False))
+
+    # -- Citation validation ---------------------------------------------------
+    # Only evidence that was actually placed in the prompt may be cited.
+    by_id = {c.chunk_id: c for c in used_chunks}
+    citations: List[ChatCitation] = []
+    seen: set[str] = set()
+    for raw in (data.get("citations") or []):
+        if not isinstance(raw, dict):
+            continue
+        ev_id = str(raw.get("evidence_id") or "").strip()
+        chunk = by_id.get(ev_id)
+        if chunk is None:
+            logger.warning(
+                "Dropped fabricated citation %r (not in supplied evidence for scope %s)",
+                ev_id, scope.scope_id,
+            )
+            continue
+        if ev_id in seen:
+            continue
+        seen.add(ev_id)
+        citations.append(ChatCitation(
+            paper_id=chunk.paper_id,
+            title=chunk.paper_title or "",
+            year=None,
+            reason=str(raw.get("claim") or "")[:500],
+            chunk_id=chunk.chunk_id,
+            page=chunk.page,
+            score=round(chunk.score, 6),
+        ))
+
+    evidence = [
+        EvidenceRef(
+            chunk_id=c.chunk_id,
+            paper_id=c.paper_id,
+            page=c.page,
+            chunk_index=c.chunk_index,
+            score=round(c.score, 6),
+            paper_title=c.paper_title,
+            text=(c.text if include_evidence_text else None),
+        )
+        for c in used_chunks
+    ]
+
+    debug = RetrievalDebug(
+        scope_type=scope.type,
+        scope_id=scope.scope_id,
+        paper_ids=list(scope.paper_ids),
+        candidate_count=retrieval.candidate_count,
+        retrieved_chunk_ids=[c.chunk_id for c in used_chunks],
+        similarity_scores=[round(c.score, 6) for c in used_chunks],
+        retrieval_latency_ms=round(retrieval.latency_ms, 2),
+        embedding_dim=retrieval.embedding_dim,
+        error=retrieval.error,
+    )
+
+    return ScopedAnswer(
+        answer=answer,
+        grounded=grounded,
+        abstained=abstained,
+        citations=citations,
+        evidence=evidence,
+        model=model,
+        retrieval=debug,
+        prompt_chars=prompt_chars,
+        generation_latency_ms=round(latency_ms, 2),
+    )
+
+
+# Attach to the router instance so callers can use either entry point.
+AIRouter.answer_scoped = staticmethod(answer_scoped)

@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.api.deps import get_db, get_current_user
+from app.db.neo4j_client import get_neo4j_session
 from app.models.user import User
 from app.models.project import Project
 from app.models.chat import ChatSession, ChatMessage
@@ -35,6 +36,10 @@ from app.services.ai_router import ai_router
 from app.services.groq_service import GroqServiceError
 from app.services.project_context import project_context_builder
 from app.services.literature_review_service import literature_review_service
+from app.services.neo4j_service import neo4j_service
+from app.services.embedding_service import embedding_service
+from app.services.retrieval_service import ScopeError, retrieval_service
+from app.core.config import settings
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -79,6 +84,7 @@ async def project_chat(
     project_id: uuid.UUID,
     req: ProjectChatRequest,
     db: AsyncSession = Depends(get_db),
+    neo_session: Any = Depends(get_neo4j_session),
     current_user: User = Depends(get_current_user),
 ) -> ProjectChatResponse:
     """
@@ -98,29 +104,24 @@ async def project_chat(
     if not req.message or not req.message.strip():
         raise HTTPException(status_code=400, detail="Message cannot be empty.")
 
-    # -- Build retrieval context ------------------------------------------------
-    context, ranked_papers, paper_index = await project_context_builder.build_retrieval_context(
-        session=db,
-        project_id=project_id,
-        user_id=current_user.id,
-        query=req.message,
-        top_k=5,
-    )
+    # -- Resolve scope server-side --------------------------------------------
+    # The scope is derived from the verified project, never from the request
+    # body, and it expands to the project's papers inside the retrieval layer.
+    try:
+        scope = await retrieval_service.resolve_project_scope(db, project_id, current_user.id)
+    except ScopeError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail)
 
-    if not paper_index:
-        # Project has no papers — return a helpful message
+    if scope.is_empty:
         return ProjectChatResponse(
             answer="This project has no papers yet. Add papers to the project before asking questions.",
-            citations=[],
-            grounded=False,
-            model=None,
+            citations=[], grounded=False, model=None,
         )
 
-    # -- Load conversation history from session ---------------------------------
+    # -- Load bounded conversation history -------------------------------------
     history = []
     active_session_id = req.session_id
-
-    if active_session_id:
+    if active_session_id and not settings.eval_mode:
         try:
             session_uuid = uuid.UUID(active_session_id)
             stmt = (
@@ -134,28 +135,33 @@ async def project_chat(
             )
             chat_session = await db.scalar(stmt)
             if chat_session:
-                # Build bounded history: last 10 messages to keep context window manageable
-                recent = chat_session.messages[-10:] if len(chat_session.messages) > 10 else chat_session.messages
+                recent = chat_session.messages[-settings.RAG_MAX_HISTORY_MESSAGES:]
                 history = [{"role": m.role, "content": m.content} for m in recent]
+            else:
+                active_session_id = None
         except (ValueError, Exception) as exc:
             logger.warning("Could not load chat session %s: %s", active_session_id, exc)
             active_session_id = None
 
-    # -- Generate AI response ---------------------------------------------------
+    # -- Retrieve, then generate ----------------------------------------------
+    retrieval = await retrieval_service.retrieve(scope, req.message, neo_session=neo_session)
     try:
-        ai_resp = await ai_router.project_chat(
-            project_context=context,
-            question=req.message,
-            paper_index=paper_index,
-            history=history,
+        scoped = await ai_router.answer_scoped(
+            scope=scope, question=req.message, retrieval=retrieval, history=history,
         )
     except GroqServiceError as exc:
         raise _handle_groq_error(exc)
 
+    ai_resp = ProjectChatResponse(
+        answer=scoped.answer,
+        citations=scoped.citations,
+        grounded=scoped.grounded,
+        model=scoped.model,
+    )
+
     # -- Persist to chat session ------------------------------------------------
     try:
         if not active_session_id:
-            # Create a new session scoped to this project
             chat_session = ChatSession(
                 user_id=current_user.id,
                 project_id=project_id,
@@ -163,36 +169,25 @@ async def project_chat(
                 title=req.message[:60] + ("..." if len(req.message) > 60 else ""),
             )
             db.add(chat_session)
-            await db.flush()  # Get the ID
+            await db.flush()
             active_session_id = str(chat_session.id)
         else:
-            chat_session_uuid = uuid.UUID(active_session_id)
-            stmt = select(ChatSession).where(ChatSession.id == chat_session_uuid)
-            chat_session = await db.scalar(stmt)
+            chat_session = await db.scalar(
+                select(ChatSession).where(ChatSession.id == uuid.UUID(active_session_id))
+            )
 
-        # Store user message
-        user_msg = ChatMessage(
-            session_id=chat_session.id,
-            role="user",
-            content=req.message,
-            cited_paper_ids=[],
-        )
-        db.add(user_msg)
-
-        # Store AI response with validated citation IDs
-        cited_ids = [c.paper_id for c in ai_resp.citations]
-        ai_msg = ChatMessage(
-            session_id=chat_session.id,
-            role="assistant",
-            content=ai_resp.answer,
-            cited_paper_ids=cited_ids,
-        )
-        db.add(ai_msg)
+        db.add(ChatMessage(
+            session_id=chat_session.id, role="user",
+            content=req.message, cited_paper_ids=[],
+        ))
+        db.add(ChatMessage(
+            session_id=chat_session.id, role="assistant",
+            content=scoped.answer,
+            cited_paper_ids=sorted({c.paper_id for c in scoped.citations}),
+        ))
         await db.commit()
-
     except Exception as exc:
         logger.error("Failed to persist chat messages: %s", exc)
-        # Non-fatal — still return the AI response
         await db.rollback()
 
     # Attach session ID to response

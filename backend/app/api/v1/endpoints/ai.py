@@ -48,6 +48,7 @@ logger = logging.getLogger(__name__)
 def _paper_to_dict(paper: Any) -> dict:
     """Convert a Paper ORM model to a plain dict for the AI layer."""
     return {
+        "id": str(paper.id),
         "title": paper.title,
         "abstract": paper.abstract,
         "publication_year": paper.publication_year,

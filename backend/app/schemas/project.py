@@ -42,5 +42,10 @@ class ProjectPaperResponse(ProjectPaperBase):
     project_id: uuid.UUID
     paper_id: uuid.UUID
     added_at: datetime
+    # Set on add-to-project so the client knows whether Ask AI can be used yet.
+    # Never populated optimistically: `ask_ai_ready` is true only once chunks
+    # actually exist.
+    indexing_status: Optional[str] = None
+    ask_ai_ready: bool = False
     
     model_config = ConfigDict(from_attributes=True)

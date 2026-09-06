@@ -52,6 +52,26 @@ def _rank_papers_by_query(query: str, papers: List[Dict], top_k: int = 5) -> Lis
     return [p for _, _, p in scored[:top_k]]
 
 
+def _first_summary(paper) -> Optional[str]:
+    """Best available cached summary for a paper, or None.
+
+    `Paper.analysis` is a list (it comes from a backref), and PaperAnalysis has
+    no `summary_tldr` column — it has summary_eli5/_student/_researcher. The
+    previous `paper.analysis.summary_tldr` expression only avoided raising
+    because the table was empty; it would have crashed on the first analysed
+    paper.
+    """
+    analyses = getattr(paper, "analysis", None) or []
+    if not isinstance(analyses, (list, tuple)):
+        analyses = [analyses]
+    for a in analyses:
+        for field in ("summary_researcher", "summary_student", "summary_eli5"):
+            value = getattr(a, field, None)
+            if value:
+                return value
+    return None
+
+
 def compute_paper_set_version(paper_ids: List[str]) -> str:
     """Return SHA-256 fingerprint of sorted paper IDs."""
     return hashlib.sha256(",".join(sorted(str(pid) for pid in paper_ids)).encode()).hexdigest()
@@ -97,7 +117,7 @@ class ProjectContextBuilder:
             "citation_count": paper.citation_count,
             "status": pp.status or "unread",
             "favorite": pp.favorite,
-            "summary_tldr": paper.analysis.summary_tldr if paper.analysis else None,
+            "summary_tldr": _first_summary(paper),
             "notes": [n.content for n in (pp.notes or [])],
             "highlights": [h.selected_text + (f" (Note: {h.ai_note})" if getattr(h, "ai_note", None) else "") for h in (pp.highlights or [])],
         }
@@ -119,8 +139,9 @@ class ProjectContextBuilder:
             for pp in project.project_papers:
                 paper = pp.paper
                 lines.append(f"\nPaper: {paper.title} ({paper.publication_year})")
-                if paper.analysis and paper.analysis.summary_tldr:
-                    lines.append(f"Summary: {paper.analysis.summary_tldr}")
+                summary = _first_summary(paper)
+                if summary:
+                    lines.append(f"Summary: {summary}")
                 elif paper.abstract:
                     lines.append(f"Abstract: {paper.abstract[:300]}")
                 for n in (pp.notes or []):

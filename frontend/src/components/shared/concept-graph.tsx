@@ -1,9 +1,41 @@
-import { ConceptGraphData } from "@/lib/api/papers";
-import { Card } from "@/components/ui/card";
-import { Waypoints, ArrowRight } from "lucide-react";
-import { Badge } from "@/components/ui/badge";
+"use client";
+
+import { useEffect, useRef, useState } from "react";
+// The project-scoped concept graph type lives in the projects API module;
+// importing it from papers.ts silently resolved to nothing and left this
+// component's props untyped.
+import { ConceptGraphData, ConceptGraphNode, ConceptGraphEdge } from "@/lib/api/projects";
+import { Waypoints } from "lucide-react";
+import dynamic from "next/dynamic";
+
+// Force graph uses canvas and window, must be loaded dynamically on client
+const ForceGraph2D = dynamic(() => import("react-force-graph-2d"), {
+  ssr: false,
+});
 
 export function ConceptGraph({ data }: { data: ConceptGraphData }) {
+  const [dimensions, setDimensions] = useState({ width: 0, height: 0 });
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (containerRef.current) {
+      const { width } = containerRef.current.getBoundingClientRect();
+      setDimensions({ width, height: 400 }); // Fixed height for graph
+    }
+
+    const handleResize = () => {
+      if (containerRef.current) {
+        setDimensions({
+          width: containerRef.current.getBoundingClientRect().width,
+          height: 400,
+        });
+      }
+    };
+
+    window.addEventListener("resize", handleResize);
+    return () => window.removeEventListener("resize", handleResize);
+  }, [data]);
+
   if (!data || data.nodes.length === 0) {
     return (
       <div className="flex h-48 w-full flex-col items-center justify-center rounded-xl border border-dashed border-line bg-surface/50 text-center px-4">
@@ -14,39 +46,53 @@ export function ConceptGraph({ data }: { data: ConceptGraphData }) {
     );
   }
 
+  // Format data for react-force-graph
+  const graphData = {
+    nodes: data.nodes.map((n: ConceptGraphNode) => ({ ...n, val: n.type === "paper" ? 2 : 1 })),
+    links: data.edges.map((e: ConceptGraphEdge) => ({ source: e.source, target: e.target, name: e.label }))
+  };
+
   return (
-    <div className="flex flex-col rounded-xl border border-line bg-surface p-6 shadow-sm overflow-x-auto">
-      <div className="mb-4 flex items-center gap-2">
+    <div className="flex flex-col rounded-xl border border-line bg-surface shadow-sm overflow-hidden" ref={containerRef}>
+      <div className="flex items-center gap-2 p-4 border-b border-line bg-surface">
         <Waypoints className="h-4 w-4 text-brass-600" />
         <h3 className="text-sm font-medium text-ink">Concept graph</h3>
       </div>
       
-      <div className="flex flex-col gap-4 p-2 min-w-[300px]">
-        {data.edges.map((edge, i) => {
-          const sourceNode = data.nodes.find(n => n.id === edge.source);
-          const targetNode = data.nodes.find(n => n.id === edge.target);
-          if (!sourceNode || !targetNode) return null;
-          
-          return (
-            <div key={i} className="flex items-center gap-3">
-              <Card className="p-2 border-brass-200 bg-brass-50/50 flex-1 text-center truncate">
-                <Badge variant="outline" className="text-[9px] mb-1 opacity-70 bg-transparent border-brass-300 text-brass-800">{sourceNode.type}</Badge>
-                <p className="text-xs font-medium text-ink truncate">{sourceNode.label}</p>
-              </Card>
-              
-              <div className="flex flex-col items-center flex-[0.5]">
-                <p className="text-[10px] text-brass-600 italic whitespace-nowrap mb-0.5">{edge.label}</p>
-                <ArrowRight className="h-4 w-4 text-brass-400" />
-              </div>
-              
-              <Card className="p-2 border-brass-200 bg-brass-50/50 flex-1 text-center truncate">
-                <Badge variant="outline" className="text-[9px] mb-1 opacity-70 bg-transparent border-brass-300 text-brass-800">{targetNode.type}</Badge>
-                <p className="text-xs font-medium text-ink truncate">{targetNode.label}</p>
-              </Card>
-            </div>
-          );
-        })}
-      </div>
+      {dimensions.width > 0 && (
+        <div className="bg-surface relative">
+          <ForceGraph2D
+            width={dimensions.width}
+            height={dimensions.height}
+            graphData={graphData}
+            nodeLabel="label"
+            nodeColor={(node: any) => {
+              // The per-paper API returns "Paper"/"Concept" while the project
+              // API returns "paper"/"concept"; comparing case-sensitively meant
+              // every project-graph node fell through to the default colour.
+              switch (String(node.type ?? "").toLowerCase()) {
+                case "paper": return "#0f766e";   // teal-700
+                case "concept": return "#d97706"; // amber-600
+                case "method": return "#2563eb";  // blue-600
+                case "dataset": return "#16a34a"; // green-600
+                default: return "#475569";        // slate-600
+              }
+            }}
+            nodeRelSize={6}
+            linkColor={() => "#cbd5e1"} // slate-300
+            linkDirectionalArrowLength={3.5}
+            linkDirectionalArrowRelPos={1}
+            linkCurvature={0.25}
+            linkLabel="name"
+            d3AlphaDecay={0.05}
+            d3VelocityDecay={0.4}
+            onNodeClick={(node: any) => {
+              // Can add specific logic here later
+              console.log("Clicked:", node);
+            }}
+          />
+        </div>
+      )}
     </div>
   );
 }

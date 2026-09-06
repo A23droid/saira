@@ -1,4 +1,4 @@
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
     from app.models.project_paper import ProjectPaper
@@ -30,11 +30,13 @@ class Paper(Base):
     publication_year: Mapped[int | None] = mapped_column(Integer, nullable=True)
     venue: Mapped[str | None] = mapped_column(String(255), nullable=True)
     
-    pdf_url: Mapped[str | None] = mapped_column(Text, nullable=True)
-    source: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    pdf_url: Mapped[Optional[str]] = mapped_column(String(1024), nullable=True)
+    source: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    citation_count: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    reference_count: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     
-    citation_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    reference_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    indexing_status: Mapped[str] = mapped_column(String(50), default="not_indexed", server_default="not_indexed")
+    indexing_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
