@@ -23,7 +23,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.api.deps import get_db, get_current_user
-from app.db.neo4j_client import get_neo4j_session
 from app.models.user import User
 from app.models.project import Project
 from app.models.chat import ChatSession, ChatMessage
@@ -36,8 +35,6 @@ from app.services.ai_router import ai_router
 from app.services.groq_service import GroqServiceError
 from app.services.project_context import project_context_builder
 from app.services.literature_review_service import literature_review_service
-from app.services.neo4j_service import neo4j_service
-from app.services.embedding_service import embedding_service
 from app.services.retrieval_service import ScopeError, retrieval_service
 from app.core.config import settings
 
@@ -84,7 +81,6 @@ async def project_chat(
     project_id: uuid.UUID,
     req: ProjectChatRequest,
     db: AsyncSession = Depends(get_db),
-    neo_session: Any = Depends(get_neo4j_session),
     current_user: User = Depends(get_current_user),
 ) -> ProjectChatResponse:
     """
@@ -92,9 +88,9 @@ async def project_chat(
 
     Architecture:
       1. Verify project ownership
-      2. BM25 retrieval: rank top-5 most relevant papers by query
-      3. Build bounded context from retrieved papers
-      4. Call GPT-OSS 120B with project context + conversation history
+      2. Knowledge retrieval: rank in-scope knowledge entries (Postgres FTS)
+      3. Build a bounded evidence block from the entries that fit
+      4. Call the configured LLM with that evidence + conversation history
       5. Parse and validate citations (only papers from this project)
       6. Persist message to chat session (create session if needed)
       7. Return grounded answer with citations
@@ -144,7 +140,7 @@ async def project_chat(
             active_session_id = None
 
     # -- Retrieve, then generate ----------------------------------------------
-    retrieval = await retrieval_service.retrieve(scope, req.message, neo_session=neo_session)
+    retrieval = await retrieval_service.retrieve(db, scope, req.message)
     try:
         scoped = await ai_router.answer_scoped(
             scope=scope, question=req.message, retrieval=retrieval, history=history,

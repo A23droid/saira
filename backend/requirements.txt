@@ -26,8 +26,12 @@ python-multipart>=0.0.12
 python-dotenv>=1.0.1
 pillow>=10.4.0
 groq>=1.7.0
-neo4j>=5.24.0
 
-# PDF & Embeddings
+# PDF text extraction
 pymupdf>=1.24.9
-sentence-transformers>=3.0.1
+
+# Optional, per deployment target — not imported unless selected:
+#   LLM_PROVIDER=bedrock          -> anthropic
+#   KNOWLEDGE_STORE_BACKEND=s3    -> boto3
+# anthropic>=0.40.0
+# boto3>=1.35.0

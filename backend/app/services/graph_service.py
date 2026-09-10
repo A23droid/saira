@@ -1,211 +1,270 @@
+"""
+Graph views over the knowledge layer.
+
+These endpoints used to read Neo4j. They now read `paper_concepts`,
+`concept_relations` and `paper_citations` in PostgreSQL. The wire shapes
+(`ConceptGraphData`, `CitationGraphData`, `GraphCitationsResponse`,
+`DependencyResponse`) are unchanged, so `concept-graph.tsx` and
+`citation-graph.tsx` did not need touching.
+
+A graph database was never load-bearing for these views. Every query here is a
+one- or two-hop lookup keyed on a paper or a concept — the shape a relational
+join handles perfectly well. The traversal Neo4j was actually good at
+(`get_similar_candidates`, arbitrary-depth co-citation) is the one feature that
+had to be reimplemented rather than translated; see
+`search_service.get_similar_papers`, which now ranks by shared concept count.
+
+One behaviour deliberately changed: `get_project_citation_graph` used to
+fabricate its edges. It sorted the project's papers by year, asserted that
+every newer paper cited every older one, and appended two invented nodes
+labelled "External Foundation Paper" and "Recent Follow-up Work". None of that
+came from data. It now returns real citation edges and an empty graph when
+none have been synced, because a citation graph that invents citations is
+worse than one that admits it is empty.
+"""
+
+from __future__ import annotations
+
+import logging
 import uuid
-from typing import Any
+from typing import Any, Dict, List
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
 
-from app.models.project_paper import ProjectPaper
+from app.models.knowledge import ConceptRelation, PaperCitation, PaperConcept
 from app.models.paper import Paper
-from app.models.paper_analysis import PaperAnalysis
+from app.models.project_paper import ProjectPaper
 from app.schemas.paper import CitationGraphData, ConceptGraphData
 
+logger = logging.getLogger(__name__)
+
+
+def _truncate(label: str, limit: int = 60) -> str:
+    label = label or "Untitled paper"
+    return label[:limit] + ("..." if len(label) > limit else "")
+
+
 class GraphService:
-    async def get_project_citation_graph(self, session: AsyncSession, project_id: uuid.UUID) -> CitationGraphData:
-        # 1. Fetch all project papers
-        stmt = select(Paper).join(ProjectPaper).where(ProjectPaper.project_id == project_id)
-        project_papers = list(await session.scalars(stmt))
-        
-        nodes = []
-        edges = []
-        
-        if not project_papers:
+
+    # ── Per-paper views ───────────────────────────────────────────────────
+
+    async def get_paper_concept_graph(
+        self, session: AsyncSession, paper_id: uuid.UUID
+    ) -> Dict[str, List[Dict[str, Any]]]:
+        """Concept subgraph for exactly one paper.
+
+        Scope is enforced in the WHERE clause, so a concept shared with another
+        paper contributes only this paper's edge. Nothing relies on the
+        frontend filtering the response.
+        """
+        rows = list(await session.scalars(
+            select(PaperConcept).where(PaperConcept.paper_id == paper_id)
+        ))
+        concepts = [
+            {
+                "id": c.concept_key,
+                "name": c.name,
+                "description": c.description,
+                "pages": c.pages or [],
+                "chunk_ids": c.entry_keys or [],
+            }
+            for c in rows
+        ]
+        keys = {c["id"] for c in concepts}
+
+        rel_rows = list(await session.scalars(
+            select(ConceptRelation).where(ConceptRelation.paper_id == paper_id)
+        ))
+        relations = [
+            {"source": r.source_key, "target": r.target_key, "type": r.relation_type}
+            for r in rel_rows
+            if r.source_key in keys and r.target_key in keys
+        ]
+        return {"concepts": concepts, "relations": relations}
+
+    async def get_paper_citations(
+        self, session: AsyncSession, paper_id: uuid.UUID
+    ) -> Dict[str, List[Dict[str, Any]]]:
+        """Return this paper's outbound references and inbound citations.
+
+        The `citations` / `references` naming is inherited from the Neo4j
+        implementation and preserved exactly: `citations` are works this paper
+        points at, `references` are works pointing back at it.
+        """
+        rows = list(await session.scalars(
+            select(PaperCitation).where(PaperCitation.paper_id == paper_id)
+        ))
+
+        def _shape(r: PaperCitation) -> Dict[str, Any]:
+            return {
+                "id": r.other_id,
+                "title": r.other_title or "Untitled",
+                "year": r.other_year,
+                "doi": r.other_doi,
+                "arxiv_id": r.other_arxiv_id,
+                "semantic_scholar_id": r.other_semantic_scholar_id,
+                "has_pdf": r.other_has_pdf,
+            }
+
+        return {
+            "citations": [_shape(r) for r in rows if r.direction == "outbound"],
+            "references": [_shape(r) for r in rows if r.direction == "inbound"],
+        }
+
+    async def get_paper_dependencies(
+        self, session: AsyncSession, paper_id: uuid.UUID
+    ) -> List[Dict[str, Any]]:
+        """Methods/datasets/concepts this paper depends on.
+
+        Neo4j modelled these as distinct node labels reached by
+        `USES_METHOD` / `USES_DATASET` / `HAS_CONCEPT`. The knowledge layer
+        keeps the same distinction in `paper_concepts.kind`, so the response
+        shape is unchanged.
+        """
+        rows = list(await session.scalars(
+            select(PaperConcept).where(PaperConcept.paper_id == paper_id)
+        ))
+        type_map = {"concept": "Concept", "method": "Method", "topic": "Topic"}
+        return [
+            {
+                "id": c.concept_key,
+                "name": c.name,
+                "type": type_map.get(c.kind, "Concept"),
+                "rel_props": {
+                    "pages": c.pages or [],
+                    "evidence": c.evidence,
+                },
+            }
+            for c in rows
+        ]
+
+    # ── Project views ─────────────────────────────────────────────────────
+
+    async def _project_paper_ids(
+        self, session: AsyncSession, project_id: uuid.UUID
+    ) -> List[uuid.UUID]:
+        rows = await session.execute(
+            select(ProjectPaper.paper_id).where(ProjectPaper.project_id == project_id)
+        )
+        return [r[0] for r in rows]
+
+    async def get_project_citation_graph(
+        self, session: AsyncSession, project_id: uuid.UUID
+    ) -> CitationGraphData:
+        """Real citation edges among and around the project's papers.
+
+        Group 1 is a project paper; group 2 is an external work this project
+        cites; group 3 is an external work citing into the project.
+        """
+        paper_ids = await self._project_paper_ids(session, project_id)
+        nodes: List[Dict[str, Any]] = []
+        edges: List[Dict[str, Any]] = []
+        if not paper_ids:
             return {"nodes": nodes, "edges": edges}
-            
-        project_paper_ids = set()
-        
-        # Add project papers as group 1
-        for p in project_papers:
-            project_paper_ids.add(str(p.id))
+
+        papers = list(await session.scalars(
+            select(Paper).where(Paper.id.in_(paper_ids))
+        ))
+        local_ids = {str(p.id) for p in papers}
+        for p in papers:
             nodes.append({
                 "id": str(p.id),
-                "label": p.title[:60] + ("..." if len(p.title) > 60 else ""),
+                "label": _truncate(p.title),
                 "year": p.publication_year,
-                "group": 1
+                "group": 1,
             })
-            
-        # We will use the local project papers to see if they cite each other as a simplistic mock.
-        # Generate some mock relationships based on year to ensure directed edges make sense
-        sorted_papers = sorted(project_papers, key=lambda x: x.publication_year or 0)
-        for i in range(len(sorted_papers)):
-            for j in range(i + 1, len(sorted_papers)):
-                # Newer cites older
-                edges.append({
-                    "source": str(sorted_papers[j].id),
-                    "target": str(sorted_papers[i].id)
+
+        citations = list(await session.scalars(
+            select(PaperCitation).where(PaperCitation.paper_id.in_(paper_ids))
+        ))
+
+        seen_external: Dict[str, int] = {}
+        for c in citations:
+            local = str(c.paper_id)
+            other = str(c.other_id)
+
+            if other not in local_ids and other not in seen_external:
+                # An external work is added once, grouped by which direction
+                # first pulled it into the graph.
+                seen_external[other] = 2 if c.direction == "outbound" else 3
+                nodes.append({
+                    "id": other,
+                    "label": _truncate(c.other_title or "External work"),
+                    "year": c.other_year,
+                    "group": seen_external[other],
                 })
-                
-        # To simulate external papers, let's create a few dummy nodes if we have at least one paper
-        if project_papers:
-            base_p = project_papers[0]
-            ext1_id = f"ext-1-{base_p.id}"
-            ext2_id = f"ext-2-{base_p.id}"
-            nodes.append({"id": ext1_id, "label": "External Foundation Paper", "year": (base_p.publication_year or 2023) - 2, "group": 2})
-            nodes.append({"id": ext2_id, "label": "Recent Follow-up Work", "year": (base_p.publication_year or 2023) + 1, "group": 3})
-            
-            edges.append({"source": str(base_p.id), "target": ext1_id})
-            edges.append({"source": ext2_id, "target": str(base_p.id)})
-            
+
+            if c.direction == "outbound":
+                edges.append({"source": local, "target": other})
+            else:
+                edges.append({"source": other, "target": local})
+
         return {"nodes": nodes, "edges": edges}
 
-    async def get_project_concept_graph_from_neo4j(
+    async def get_project_concept_graph(
         self, session: AsyncSession, project_id: uuid.UUID
     ) -> ConceptGraphData:
-        """Build the project concept graph from the actual concept pipeline.
+        """Concept graph across every paper in the project.
 
-        The previous implementation read `paper_analyses`, a table the concept
-        pipeline never writes (and which held zero rows in production), so the
-        project graph rendered papers with no concepts attached no matter what
-        was extracted. This reads the same Neo4j subgraph the per-paper view
-        uses, scoped to the project's papers.
+        Shared concepts are what make this a graph rather than a set of stars:
+        two papers asserting the same `concept_key` produce two edges into one
+        node, which is exactly how the Neo4j version behaved.
         """
-        from app.db.neo4j_client import neo4j_client
-        from app.services.neo4j_service import neo4j_service
-
-        stmt = select(ProjectPaper.paper_id).where(ProjectPaper.project_id == project_id)
-        rows = await session.execute(stmt)
-        paper_ids = [str(r[0]) for r in rows]
+        paper_ids = await self._project_paper_ids(session, project_id)
         if not paper_ids:
             return {"nodes": [], "edges": []}
 
-        neo_sess = await neo4j_client.get_session()
-        async with neo_sess:
-            data = await neo4j_service.get_project_concept_graph(neo_sess, paper_ids)
+        papers = list(await session.scalars(
+            select(Paper).where(Paper.id.in_(paper_ids))
+        ))
+        titles = {str(p.id): p.title for p in papers}
 
-        nodes: list[dict] = []
-        edges: list[dict] = []
+        nodes: List[Dict[str, Any]] = [
+            {"id": pid, "label": _truncate(titles.get(pid)), "type": "paper"}
+            for pid in (str(x) for x in paper_ids)
+        ]
+        edges: List[Dict[str, Any]] = []
 
-        titles = {p["id"]: p.get("title") for p in data.get("papers", [])}
-        for pid in paper_ids:
-            label = titles.get(pid) or "Untitled paper"
-            nodes.append({
-                "id": pid,
-                "label": label[:60] + ("..." if len(label) > 60 else ""),
-                "type": "paper",
-            })
-
-        concept_ids = set()
-        for c in data.get("concepts", []):
-            concept_ids.add(c["id"])
-            nodes.append({"id": c["id"], "label": c.get("name") or "", "type": "concept"})
-            for pid in (c.get("paper_ids") or []):
-                if pid in titles:
-                    edges.append({"source": pid, "target": c["id"], "label": "discusses"})
-
-        for r in data.get("relations", []):
-            # Both endpoints are guaranteed in-project by the query, but drop
-            # anything that did not make it into the node list so the frontend
-            # never receives an edge pointing at a node it wasn't given.
-            if r["source"] in concept_ids and r["target"] in concept_ids:
-                edges.append({
-                    "source": r["source"],
-                    "target": r["target"],
-                    "label": (r.get("type") or "RELATES_TO").lower(),
+        concept_rows = list(await session.scalars(
+            select(PaperConcept).where(PaperConcept.paper_id.in_(paper_ids))
+        ))
+        concept_keys: set[str] = set()
+        for c in concept_rows:
+            if c.concept_key not in concept_keys:
+                concept_keys.add(c.concept_key)
+                nodes.append({
+                    "id": c.concept_key,
+                    "label": c.name,
+                    "type": "concept",
                 })
-
-        return {"nodes": nodes, "edges": edges}
-
-    async def get_project_concept_graph_legacy(self, session: AsyncSession, project_id: uuid.UUID) -> ConceptGraphData:
-        # 1. Fetch all project papers with their analysis
-        stmt = (
-            select(Paper)
-            .join(ProjectPaper)
-            .where(ProjectPaper.project_id == project_id)
-            .options(selectinload(Paper.analysis))
-        )
-        project_papers = list(await session.scalars(stmt))
-        
-        nodes = []
-        edges = []
-        node_map = {} # label_type -> id
-        
-        for p in project_papers:
-            paper_node_id = str(p.id)
-            nodes.append({
-                "id": paper_node_id,
-                "label": p.title[:50] + ("..." if len(p.title) > 50 else ""),
-                "type": "paper"
+            edges.append({
+                "source": str(c.paper_id),
+                "target": c.concept_key,
+                "label": "discusses",
             })
-            
-            analysis = p.analysis
-            if not analysis:
+
+        rel_rows = list(await session.scalars(
+            select(ConceptRelation).where(ConceptRelation.paper_id.in_(paper_ids))
+        ))
+        seen_edges: set[tuple] = set()
+        for r in rel_rows:
+            # Drop any edge whose endpoints are not both in the node list, so
+            # the frontend never receives an edge pointing at a node it wasn't
+            # given.
+            if r.source_key not in concept_keys or r.target_key not in concept_keys:
                 continue
-                
-            # Helper to add concepts and edges
-            def add_concepts(items, concept_type, edge_label):
-                if not items:
-                    return
-                # Extract list from dict or list
-                item_list = []
-                if isinstance(items, dict):
-                    item_list = list(items.keys())
-                elif isinstance(items, list):
-                    item_list = items
-                    
-                for item in item_list:
-                    if not isinstance(item, str):
-                        continue
-                    clean_item = item.strip().title()
-                    if not clean_item:
-                        continue
-                    
-                    key = f"{clean_item}_{concept_type}"
-                    if key not in node_map:
-                        concept_id = str(uuid.uuid4())
-                        node_map[key] = concept_id
-                        nodes.append({
-                            "id": concept_id,
-                            "label": clean_item,
-                            "type": concept_type
-                        })
-                    else:
-                        concept_id = node_map[key]
-                        
-                    edges.append({
-                        "source": paper_node_id,
-                        "target": concept_id,
-                        "label": edge_label
-                    })
+            key = (r.source_key, r.target_key, r.relation_type)
+            if key in seen_edges:
+                continue
+            seen_edges.add(key)
+            edges.append({
+                "source": r.source_key,
+                "target": r.target_key,
+                "label": (r.relation_type or "RELATES_TO").lower(),
+            })
 
-            if len(analysis) > 0:
-                a = analysis[0]
-                add_concepts(a.models, "model", "uses_model")
-                add_concepts(a.algorithms, "method", "uses_method")
-                add_concepts(a.datasets, "dataset", "evaluated_on")
-                add_concepts(a.results, "result", "reports")
-                
-                # Add glossary as generic concepts
-                if getattr(a, 'glossary', None) and isinstance(a.glossary, dict):
-                    add_concepts(list(a.glossary.keys()), "concept", "discusses")
-                
         return {"nodes": nodes, "edges": edges}
-
-    async def get_project_concept_graph(self, session: AsyncSession, project_id: uuid.UUID) -> ConceptGraphData:
-        """Project concept graph, sourced from Neo4j.
-
-        Falls back to the legacy PaperAnalysis-derived graph only if Neo4j is
-        unreachable, so a graph-store outage degrades to whatever analysis data
-        exists rather than returning a hard error to the UI.
-        """
-        try:
-            return await self.get_project_concept_graph_from_neo4j(session, project_id)
-        except Exception as exc:
-            import logging
-            logging.getLogger(__name__).error(
-                "Neo4j concept graph failed for project %s (%s); falling back to analysis data",
-                project_id, exc,
-            )
-            return await self.get_project_concept_graph_legacy(session, project_id)
 
 
 graph_service = GraphService()

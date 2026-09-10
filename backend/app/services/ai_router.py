@@ -132,139 +132,40 @@ class AIRouter:
             logger.error("Summarize failed: %s", exc)
             raise GroqServiceError(f"Summary generation failed: {exc}") from exc
 
-    async def answer_question(self, paper: Dict[str, Any], question: str, history: Optional[List[Dict[str, str]]] = None) -> AIQAResponse:
-        """Answer a question about a paper using the primary model and RAG context."""
-        model = _model_for(AITask.QA)
-        
-        # RAG context budget constants
-        MAX_CHUNK_CHARS = 2000
-        MAX_TOTAL_CONTEXT_CHARS = 10000
-        MAX_HISTORY_MESSAGES = 4
+    async def answer_question(
+        self,
+        db: "AsyncSession",
+        paper_id: str,
+        question: str,
+        history: Optional[List[Dict[str, str]]] = None,
+    ) -> AIQAResponse:
+        """Answer a question about one paper.
 
-        # limit history
-        if history and len(history) > MAX_HISTORY_MESSAGES:
-            history = history[-MAX_HISTORY_MESSAGES:]
-            
-        # 1. Embed question and retrieve chunks
-        from app.services.embedding_service import embedding_service
-        from app.services.neo4j_service import neo4j_service
-        from app.db.neo4j_client import neo4j_client
-        import asyncio
-        import json
-        
-        query_embedding = await asyncio.to_thread(embedding_service.embed_text, question)
-        
-        chunks_text = ""
-        retrieved_count = 0
+        Rewritten during the LLM-Wiki migration to go through the same scoped
+        pipeline Paper Chat uses. It previously carried its own inline
+        retrieval, its own context budget constants, and — the actual bug — no
+        citation validation at all, so this endpoint could return claims
+        attributed to evidence that was never supplied. There is now exactly
+        one retrieval path and one grounding policy in the codebase.
+
+        The response schema is unchanged; `AIQAResponse` never exposed
+        citations, so the extra structure `answer_scoped` produces is simply
+        not surfaced here.
+        """
+        from app.services.retrieval_service import ScopeError, retrieval_service
+
         try:
-            neo_sess = await neo4j_client.get_session()
-            async with neo_sess:
-                chunks = await neo4j_service.get_relevant_chunks(neo_sess, str(paper["id"]), query_embedding, top_k=5)
-                if chunks:
-                    retrieved_count = len(chunks)
-                    processed_chunks = []
-                    current_chars = 0
-                    for c in chunks:
-                        text = c['text'][:MAX_CHUNK_CHARS]
-                        chunk_str = f"[Page {c['page']}] {text}"
-                        if current_chars + len(chunk_str) > MAX_TOTAL_CONTEXT_CHARS:
-                            break
-                        processed_chunks.append(chunk_str)
-                        current_chars += len(chunk_str)
-                        
-                    chunks_text = "\n\n".join(processed_chunks)
-        except Exception as e:
-            logger.warning(f"Failed to retrieve chunks for QA: {e}")
-            
-        extra_context = ""
-        if chunks_text:
-            extra_context = f"--- RETRIEVED PDF SNIPPETS ---\n{chunks_text}\n------------------------------"
-            
-        messages = build_qa_messages(paper, question, history, extra_context=extra_context)
-        
-        # Log payload metrics before calling groq
-        request_size = sum(len(m.get("content", "")) for m in messages)
-        logger.info(f"RAG Request - Chunks: {retrieved_count} | Extra Context Chars: {len(extra_context)} | History Msgs: {len(history) if history else 0} | Est. Request Size (chars): {request_size}")
-        
-        raw = await groq_service.chat_complete(model, messages)
-        grounded = True
-        answer = raw
-        lines = raw.splitlines()
-        if lines:
-            last = lines[-1].strip()
-            if last.upper().startswith("GROUNDED:"):
-                grounded = "true" in last.lower()
-                answer = "\n".join(lines[:-1]).strip()
-        return AIQAResponse(answer=answer, grounded=grounded, model=model)
+            scope = await retrieval_service.resolve_paper_scope(db, paper_id)
+        except ScopeError as exc:
+            raise GroqServiceError(exc.detail) from exc
 
-    async def project_answer_question(self, project_context: str, question: str, paper_ids: List[str], history: Optional[List[Dict[str, str]]] = None) -> AIQAResponse:
-        """Answer a question about a project using the primary model and RAG context."""
-        model = _model_for(AITask.QA)
-        
-        # RAG context budget constants
-        MAX_CHUNK_CHARS = 2000
-        MAX_TOTAL_CONTEXT_CHARS = 10000
-        MAX_HISTORY_MESSAGES = 4
-
-        # limit history
-        if history and len(history) > MAX_HISTORY_MESSAGES:
-            history = history[-MAX_HISTORY_MESSAGES:]
-            
-        # 1. Embed question and retrieve chunks
-        from app.services.embedding_service import embedding_service
-        from app.services.neo4j_service import neo4j_service
-        from app.db.neo4j_client import neo4j_client
-        import asyncio
-        import json
-        
-        query_embedding = await asyncio.to_thread(embedding_service.embed_text, question)
-        
-        chunks_text = ""
-        retrieved_count = 0
-        try:
-            neo_sess = await neo4j_client.get_session()
-            async with neo_sess:
-                chunks = await neo4j_service.get_project_relevant_chunks(neo_sess, paper_ids, query_embedding, top_k=6)
-                if chunks:
-                    retrieved_count = len(chunks)
-                    processed_chunks = []
-                    current_chars = 0
-                    for c in chunks:
-                        text = c['text'][:MAX_CHUNK_CHARS]
-                        chunk_str = f"[Paper {c['paper_id']}, Page {c['page']}] {text}"
-                        if current_chars + len(chunk_str) > MAX_TOTAL_CONTEXT_CHARS:
-                            break
-                        processed_chunks.append(chunk_str)
-                        current_chars += len(chunk_str)
-                        
-                    chunks_text = "\n\n".join(processed_chunks)
-        except Exception as e:
-            logger.warning(f"Failed to retrieve chunks for Project QA: {e}")
-            
-        extra_context = ""
-        if chunks_text:
-            extra_context = f"--- RETRIEVED PDF SNIPPETS ---\n{chunks_text}\n------------------------------"
-            
-        # We append extra context to the project context string
-        if extra_context:
-            project_context = f"{project_context}\n\n{extra_context}"
-            
-        messages = build_project_qa_messages(project_context, question, history)
-        
-        # Log payload metrics before calling groq
-        request_size = sum(len(m.get("content", "")) for m in messages)
-        logger.info(f"Project RAG Request - Chunks: {retrieved_count} | Extra Context Chars: {len(extra_context)} | History Msgs: {len(history) if history else 0} | Est. Request Size (chars): {request_size}")
-        
-        raw = await groq_service.chat_complete(model, messages)
-        grounded = True
-        answer = raw
-        lines = raw.splitlines()
-        if lines:
-            last = lines[-1].strip()
-            if last.upper().startswith("GROUNDED:"):
-                grounded = "true" in last.lower()
-                answer = "\n".join(lines[:-1]).strip()
-        return AIQAResponse(answer=answer, grounded=grounded, model=model)
+        retrieval = await retrieval_service.retrieve(db, scope, question)
+        scoped = await answer_scoped(
+            scope=scope, question=question, retrieval=retrieval, history=history,
+        )
+        return AIQAResponse(
+            answer=scoped.answer, grounded=scoped.grounded, model=scoped.model,
+        )
 
     async def research_gap(self, paper: Dict[str, Any]) -> str:
         """Identify research gaps using the primary model. Returns plain text."""

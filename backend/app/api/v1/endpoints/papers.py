@@ -13,8 +13,12 @@ from app.schemas.paper import PaperCreate, PaperUpdate, PaperResponse
 from app.schemas.project import ProjectResponse
 from app.schemas.graph import CitationResponse, DependencyResponse, ResearchMapResponse
 from app.services.paper_service import paper_service
-from app.db.neo4j_client import get_neo4j_session
-from app.services.indexing_jobs import FAILED_STATES, ensure_indexed, is_ask_ai_ready
+from app.services.indexing_jobs import (
+    FAILED_STATES,
+    ensure_indexed,
+    ensure_synced,
+    is_ask_ai_ready,
+)
 
 router = APIRouter()
 
@@ -153,65 +157,47 @@ from app.schemas.graph import CitationResponse, DependencyResponse, ResearchMapR
 async def get_citations(
     paper_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
-    neo_session: AsyncSession = Depends(get_neo4j_session),
     current_user: User = Depends(get_current_user),
 ) -> Any:
     paper = await paper_service.get_paper_by_id(session=db, paper_id=paper_id)
     if not paper:
         raise HTTPException(status_code=404, detail="Paper not found")
 
-    from app.services.neo4j_service import neo4j_service
-    from app.services.citation_service import citation_service
-    import asyncio
-    
-    citations = await neo4j_service.get_citations(neo_session, str(paper_id))
-    references = await neo4j_service.get_references(neo_session, str(paper_id))
-    
-    # If we have very few citations and references, it might not be synced yet
-    if len(citations) + len(references) == 0:
-        # Trigger background sync using a detached db session since the current one closes
-        async def background_sync(pid: str):
-            from app.db.session import AsyncSessionLocal
-            async with AsyncSessionLocal() as bg_db:
-                await citation_service.sync_paper_citations(bg_db, pid)
-                
-        asyncio.create_task(background_sync(str(paper_id)))
-        
-    return {"citations": citations, "references": references}
+    from app.services.graph_service import graph_service
+
+    data = await graph_service.get_paper_citations(db, paper_id)
+
+    if not data["citations"] and not data["references"]:
+        # Nothing synced yet — kick off a background fetch so the next load has
+        # data. Uses its own session because this request's session closes.
+        await ensure_synced("citations", str(paper_id))
+
+    return data
+
 
 @router.get("/{paper_id}/concepts", response_model=GraphConceptsResponse)
 async def get_concepts(
     paper_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
-    neo_session: AsyncSession = Depends(get_neo4j_session),
     current_user: User = Depends(get_current_user),
 ) -> Any:
     """Concept subgraph for exactly one paper.
 
-    Scope is enforced in the Cypher (`MATCH (p:Paper {id})-[:HAS_CONCEPT]->`),
-    so a concept shared with another paper contributes only this paper's edge.
+    Scope is enforced in the query (`WHERE paper_concepts.paper_id = :id`), so
+    a concept shared with another paper contributes only this paper's edge.
     Nothing here relies on the frontend filtering the response.
     """
     paper = await paper_service.get_paper_by_id(session=db, paper_id=paper_id)
     if not paper:
         raise HTTPException(status_code=404, detail="Paper not found")
 
-    from app.services.neo4j_service import neo4j_service
-    from app.services.concept_service import concept_service
-    import asyncio
+    from app.services.graph_service import graph_service
 
-    data = await neo4j_service.get_paper_concept_graph(neo_session, str(paper_id))
-    concepts = data.get("concepts", [])
+    data = await graph_service.get_paper_concept_graph(db, paper_id)
+    concepts = data["concepts"]
 
     if not concepts:
-        # Nothing extracted yet — kick off a background sync so the next load
-        # has data. Uses its own session because this request's session closes.
-        async def background_sync(pid: str):
-            from app.db.session import AsyncSessionLocal
-            async with AsyncSessionLocal() as bg_db:
-                await concept_service.sync_paper_concepts(bg_db, pid)
-
-        asyncio.create_task(background_sync(str(paper_id)))
+        await ensure_synced("concepts", str(paper_id))
 
     nodes = [{"id": str(paper_id), "label": paper.title or "Paper", "type": "Paper"}]
     edges = []
@@ -245,40 +231,36 @@ async def get_concepts(
 async def get_dependencies(
     paper_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
-    neo_session: AsyncSession = Depends(get_neo4j_session),
     current_user: User = Depends(get_current_user),
 ) -> Any:
     paper = await paper_service.get_paper_by_id(session=db, paper_id=paper_id)
     if not paper:
         raise HTTPException(status_code=404, detail="Paper not found")
 
-    from app.services.neo4j_service import neo4j_service
-    deps = await neo4j_service.get_dependencies(neo_session, str(paper_id))
-    return deps
+    from app.services.graph_service import graph_service
+    return await graph_service.get_paper_dependencies(db, paper_id)
 
 
 @router.get("/{paper_id}/research-map", response_model=ResearchMapResponse)
 async def get_research_map(
     paper_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
-    neo_session: AsyncSession = Depends(get_neo4j_session),
     current_user: User = Depends(get_current_user),
 ) -> Any:
     paper = await paper_service.get_paper_by_id(session=db, paper_id=paper_id)
     if not paper:
         raise HTTPException(status_code=404, detail="Paper not found")
 
-    from app.services.neo4j_service import neo4j_service
+    from app.services.graph_service import graph_service
     from app.services.search_service import search_service
 
-    citations = await neo4j_service.get_citations(neo_session, str(paper_id))
-    deps = await neo4j_service.get_dependencies(neo_session, str(paper_id))
+    citation_data = await graph_service.get_paper_citations(db, paper_id)
+    deps = await graph_service.get_paper_dependencies(db, paper_id)
     similar = await search_service.get_similar_papers(db, paper, limit=5)
 
     return {
         "paper": paper,
-        "citations": citations,
+        "citations": citation_data["citations"],
         "dependencies": deps,
-        "similar": similar
+        "similar": similar,
     }
-

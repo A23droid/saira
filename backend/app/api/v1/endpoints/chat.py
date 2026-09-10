@@ -132,10 +132,14 @@ def _ordered_now(count: int) -> list[datetime]:
     return [base + timedelta(microseconds=i) for i in range(count)]
 
 
-async def _answer_in_scope(scope, question: str, history: list[dict]):
+async def _answer_in_scope(db, scope, question: str, history: list[dict]):
     """Retrieve, then generate. Shared by the persistent and ephemeral paths so
-    they cannot drift apart on scoping or citation validation."""
-    retrieval = await retrieval_service.retrieve(scope, question)
+    they cannot drift apart on scoping or citation validation.
+
+    `db` is threaded through because knowledge retrieval reads the same
+    PostgreSQL the scope was resolved from — one store, one session.
+    """
+    retrieval = await retrieval_service.retrieve(db, scope, question)
     try:
         return await ai_router.answer_scoped(
             scope=scope, question=question, retrieval=retrieval, history=history,
@@ -341,7 +345,7 @@ async def add_chat_message(
         )
 
     # -- Retrieve, then generate ----------------------------------------------
-    ai_resp = await _answer_in_scope(scope, request.question, history)
+    ai_resp = await _answer_in_scope(db, scope, request.question, history)
 
     # Citations are already validated against the evidence actually sent to the
     # model, so these IDs cannot reference a paper outside the scope.
@@ -465,7 +469,7 @@ async def ask_paper_ephemeral(
     if settings.eval_mode:
         history = []
 
-    ai_resp = await _answer_in_scope(scope, request.question, history)
+    ai_resp = await _answer_in_scope(db, scope, request.question, history)
     return {
         "ai_message": {
             "role": "assistant",

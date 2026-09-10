@@ -177,8 +177,10 @@ async def paper_qa(
     current_user: User = Depends(get_current_user),
 ) -> AIQAResponse:
     """
-    Answer a question about a paper using Llama 3.3 70B.
-    Responses are grounded in the paper's stored metadata.
+    Answer a question about a paper.
+
+    Routes through the same scoped knowledge retrieval and grounding policy as
+    Paper Chat — see `ai_router.answer_question`.
     """
     try:
         paper_id = uuid.UUID(req.paper_id)
@@ -199,7 +201,7 @@ async def paper_qa(
         )
 
     try:
-        return await ai_router.answer_question(_paper_to_dict(paper), req.question)
+        return await ai_router.answer_question(db, str(paper.id), req.question)
     except GroqServiceError as exc:
         raise _handle_groq_error(exc)
 

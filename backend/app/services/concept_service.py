@@ -1,11 +1,11 @@
 """
 Concept graph extraction pipeline.
 
-    paper + indexed chunks
+    paper + compiled source units
         ↓ concept + relation extraction (routed LLM, evidence required)
         ↓ canonicalization (alias-aware, conservative)
         ↓ provenance resolution (page + chunk_id per concept)
-        ↓ idempotent Neo4j write (replace this paper's edges, keep shared nodes)
+        ↓ idempotent Postgres write (replace this paper's rows, keep shared keys)
 
 Two failures made the original version produce an empty graph in production:
 
@@ -23,12 +23,11 @@ import re
 import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.neo4j_client import neo4j_client
+from app.models.knowledge import KIND_CONCEPT, KIND_SOURCE, ConceptRelation, KnowledgeEntry, PaperConcept
 from app.models.paper import Paper
-from app.services.neo4j_service import neo4j_service
 from app.services.prompts import CONCEPT_RELATION_TYPES, build_concept_extraction_messages
 
 logger = logging.getLogger(__name__)
@@ -163,23 +162,32 @@ def is_valid_concept(name: str, canonical: str) -> bool:
 
 class ConceptService:
 
-    async def _load_chunks(self, paper_id: str) -> List[Dict[str, Any]]:
-        """Fetch this paper's indexed chunks (text + page + id) for grounding."""
+    async def _load_chunks(
+        self, db_session: AsyncSession, paper_id: str
+    ) -> List[Dict[str, Any]]:
+        """Fetch this paper's verbatim source units for grounding.
+
+        Reads `knowledge_entries` rather than Neo4j chunks after the LLM-Wiki
+        migration. The dict shape (`id`/`text`/`page`) is unchanged so the
+        evidence-location logic below did not have to move.
+        """
         try:
-            sess = await neo4j_client.get_session()
-            async with sess:
-                result = await sess.run(
-                    """
-                    MATCH (p:Paper {id: $pid})-[:HAS_CHUNK]->(c:Chunk)
-                    RETURN c.id AS id, c.text AS text, c.page AS page
-                    ORDER BY c.chunk_index
-                    LIMIT $limit
-                    """,
-                    pid=paper_id, limit=MAX_CONTEXT_CHUNKS,
+            rows = await db_session.execute(
+                select(
+                    KnowledgeEntry.entry_key,
+                    KnowledgeEntry.body,
+                    KnowledgeEntry.page,
                 )
-                return await result.data()
+                .where(
+                    KnowledgeEntry.paper_id == uuid.UUID(str(paper_id)),
+                    KnowledgeEntry.kind == KIND_SOURCE,
+                )
+                .order_by(KnowledgeEntry.ordinal)
+                .limit(MAX_CONTEXT_CHUNKS)
+            )
+            return [{"id": r[0], "text": r[1], "page": r[2]} for r in rows]
         except Exception as exc:
-            logger.warning("Could not fetch chunks for concept extraction: %s", exc)
+            logger.warning("Could not fetch source units for concept extraction: %s", exc)
             return []
 
     def _locate_evidence(
@@ -327,6 +335,8 @@ class ConceptService:
             evidence = str(item.get("evidence") or "").strip()[:600]
             pages, chunk_ids = self._locate_evidence(evidence, chunks)
             relations.append({
+                "source_key": src_key,
+                "target_key": tgt_key,
                 "source_id": by_key[src_key]["id"],
                 "target_id": by_key[tgt_key]["id"],
                 "type": rtype,
@@ -338,9 +348,11 @@ class ConceptService:
         # Strip the working field before it reaches Cypher.
         concepts = []
         for c in by_key.values():
-            c = dict(c)
-            c.pop("canonical", None)
-            concepts.append(c)
+            # `canonical` is retained deliberately: it is `concept_key` in
+            # Postgres, the value that makes two papers' mentions of the same
+            # concept the same concept. The Neo4j writer used to drop it
+            # because the node id carried identity instead.
+            concepts.append(dict(c))
 
         return concepts, relations, stats
 
@@ -375,9 +387,9 @@ class ConceptService:
             "venue": paper.venue,
         }
 
-        chunks = await self._load_chunks(paper_id)
+        chunks = await self._load_chunks(db_session, paper_id)
         if not chunks:
-            logger.info("Paper %s has no indexed chunks; extracting from metadata only.", paper_id)
+            logger.info("Paper %s has no compiled source units; extracting from metadata only.", paper_id)
 
         try:
             raw = await self.extract_concepts(paper_dict, chunks)
@@ -395,31 +407,79 @@ class ConceptService:
             return report
 
         try:
-            sess = await neo4j_client.get_session()
-            async with sess:
-                # Ensure the Paper node carries real metadata. Indexing MERGEs a
-                # bare {id} node, which left title-less nodes in the graph.
-                await sess.run(
-                    "MERGE (p:Paper {id: $id}) SET p.title = coalesce($title, p.title), "
-                    "p.publication_year = coalesce($year, p.publication_year)",
-                    id=paper_id, title=paper.title, year=paper.publication_year,
+            pid = uuid.UUID(str(paper_id))
+            if replace:
+                # Replace this paper's assertions only. `concept_key` is shared
+                # across papers by design — deleting rows here never removes
+                # another paper's view of the same concept, which is what the
+                # Neo4j version achieved by keeping shared :Concept nodes and
+                # dropping only this paper's edges. Orphan pruning is no longer
+                # needed: with no standalone concept node to strand, a concept
+                # simply stops appearing once no paper asserts it.
+                await db_session.execute(
+                    delete(PaperConcept).where(PaperConcept.paper_id == pid)
                 )
-                if replace:
-                    await neo4j_service.clear_paper_concepts(sess, paper_id)
-                await neo4j_service.upsert_concepts(sess, paper_id, concepts)
-                await neo4j_service.upsert_concept_relations(sess, paper_id, relations)
-                if replace:
-                    # Clearing this paper's edges can leave Concept nodes that
-                    # no paper references any more (extraction is not perfectly
-                    # deterministic, so a re-run may drop a concept). Without
-                    # this the node count creeps upward on every re-ingest even
-                    # though the edge count stays correct.
-                    pruned = await neo4j_service.prune_orphan_concepts(sess)
-                    if pruned:
-                        report["pruned_orphans"] = pruned
+                await db_session.execute(
+                    delete(ConceptRelation).where(ConceptRelation.paper_id == pid)
+                )
+                await db_session.execute(
+                    delete(KnowledgeEntry).where(
+                        KnowledgeEntry.paper_id == pid,
+                        KnowledgeEntry.kind == KIND_CONCEPT,
+                    )
+                )
+
+            from app.services.knowledge_compiler import slugify
+
+            base_ordinal = 900_000  # well past any source/compiled ordinal
+            for offset, c in enumerate(concepts):
+                key = c.get("canonical") or c["id"]
+                db_session.add(PaperConcept(
+                    paper_id=pid,
+                    concept_key=key,
+                    name=c.get("name") or key,
+                    kind=KIND_CONCEPT,
+                    description=c.get("description") or None,
+                    evidence=c.get("evidence") or None,
+                    pages=c.get("pages") or [],
+                    entry_keys=c.get("chunk_ids") or [],
+                ))
+                db_session.add(KnowledgeEntry(
+                    paper_id=pid,
+                    entry_key=f"{paper_id}::concept::{slugify(key)}",
+                    kind=KIND_CONCEPT,
+                    slug=slugify(key),
+                    title=c.get("name") or key,
+                    section="Key Concepts",
+                    body=c.get("description") or c.get("name") or key,
+                    page=(c.get("pages") or [None])[0],
+                    ordinal=base_ordinal + offset,
+                    provenance={
+                        "pages": c.get("pages") or [],
+                        "source_text": c.get("evidence") or "",
+                        "evidence_keys": c.get("chunk_ids") or [],
+                        "verified": bool(c.get("chunk_ids")),
+                    },
+                ))
+
+            seen_edges = set()
+            for r in relations:
+                edge = (r["source_key"], r["target_key"], r.get("type") or "RELATES_TO")
+                if edge in seen_edges:
+                    continue
+                seen_edges.add(edge)
+                db_session.add(ConceptRelation(
+                    paper_id=pid,
+                    source_key=r["source_key"],
+                    target_key=r["target_key"],
+                    relation_type=r.get("type") or "RELATES_TO",
+                ))
+
+            await db_session.commit()
         except Exception as exc:
-            report["error"] = f"neo4j_write_failed: {exc}"
-            logger.error("Failed to sync concepts to Neo4j for %s: %s", paper_id, exc)
+            await db_session.rollback()
+            report["error"] = f"concept_write_failed: {exc}"
+            logger.error("Failed to persist concepts for %s: %s", paper_id, exc)
             return report
 
         report.update(ok=True, concepts=len(concepts), relations=len(relations))

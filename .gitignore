@@ -38,3 +38,7 @@ evaluation/reports/*-report.md
 evaluation/reports/*-results.json
 evaluation/reports/traces/
 evaluation/reports/LATEST.md
+
+# Compiled knowledge pages. The knowledge store is generated output — it is
+# rebuildable from the source PDFs and belongs in S3 or on a volume, not in git.
+knowledge/

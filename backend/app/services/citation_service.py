@@ -6,9 +6,10 @@ from typing import Dict, Any, List
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from sqlalchemy import delete
+
+from app.models.knowledge import PaperCitation
 from app.models.paper import Paper
-from app.db.neo4j_client import neo4j_client
-from app.services.neo4j_service import neo4j_service
 from app.services.semantic_scholar_client import semantic_scholar_client
 
 logger = logging.getLogger(__name__)
@@ -19,9 +20,14 @@ def generate_external_id(provider: str, identifier: str) -> str:
 
 class CitationService:
     async def sync_paper_citations(self, db_session: AsyncSession, paper_id: str) -> None:
-        """
-        Fetch citations and references from Semantic Scholar and upsert them to Neo4j.
-        This does not insert unverified papers into PostgreSQL.
+        """Fetch this paper's citations and references and store the edges.
+
+        External works are still NOT inserted into `papers` — that rule
+        predates the migration and is worth keeping, because a work Semantic
+        Scholar mentions has not been verified, fetched, or indexed. Their
+        metadata is denormalized onto `paper_citations` instead, which is why
+        that table carries `other_title` / `other_year` rather than a foreign
+        key.
         """
         # Find paper to get its Semantic Scholar ID
         stmt = select(Paper).where(Paper.id == uuid.UUID(paper_id))
@@ -60,60 +66,68 @@ class CitationService:
             return
 
         try:
-            neo_sess = await neo4j_client.get_session()
-            async with neo_sess:
-                # 1. Upsert references (this paper cites them)
-                for ref in references:
-                    await self._upsert_and_link(neo_sess, ref, source_id=paper_id, target_id=None)
-                    
-                # 2. Upsert citations (they cite this paper)
-                for cit in citations:
-                    await self._upsert_and_link(neo_sess, cit, source_id=None, target_id=paper_id)
-                    
-            logger.info(f"Successfully synced {len(citations)} citations and {len(references)} references for Paper {paper_id}.")
-        except Exception as e:
-            logger.error(f"Failed to sync citations to Neo4j: {e}")
+            pid = db_paper.id
+            # Replace this paper's edges wholesale. Semantic Scholar's answer
+            # is a snapshot, and merging would leave edges from a previous
+            # snapshot that the source no longer reports.
+            await db_session.execute(
+                delete(PaperCitation).where(PaperCitation.paper_id == pid)
+            )
 
-    async def _upsert_and_link(self, neo_sess, external_paper: Dict[str, Any], source_id: str | None, target_id: str | None) -> None:
-        """
-        Upsert external paper to Neo4j and create CITES relationship.
-        If source_id is provided, source_id CITES external_paper.
-        If target_id is provided, external_paper CITES target_id.
-        """
-        # Determine ID
+            written = 0
+            seen: set[tuple[str, str]] = set()
+
+            # `references` are works this paper cites — outbound.
+            for ref in references:
+                if self._add_edge(db_session, pid, ref, "outbound", seen):
+                    written += 1
+            # `citations` are works citing this paper — inbound.
+            for cit in citations:
+                if self._add_edge(db_session, pid, cit, "inbound", seen):
+                    written += 1
+
+            await db_session.commit()
+            logger.info(
+                "citations_synced paper_id=%s inbound=%d outbound=%d written=%d",
+                paper_id, len(citations), len(references), written,
+            )
+        except Exception as e:
+            await db_session.rollback()
+            logger.error("Failed to persist citations for %s: %s", paper_id, e)
+
+    def _add_edge(
+        self,
+        db_session: AsyncSession,
+        paper_id: Any,
+        external_paper: Dict[str, Any],
+        direction: str,
+        seen: set,
+    ) -> bool:
+        """Stage one citation edge. Returns whether anything was added."""
         s2_id = external_paper.get("semantic_scholar_id")
         if not s2_id:
-            return
-            
+            # Without a stable identifier the edge cannot be deduplicated, and
+            # a duplicate citation is worse than a missing one.
+            return False
+
         ext_id = generate_external_id("semantic_scholar", s2_id)
-        
-        has_pdf = bool(external_paper.get("pdf_url"))
-        
-        paper_dict = {
-            "id": ext_id,
-            "doi": external_paper.get("doi"),
-            "arxiv_id": external_paper.get("arxiv_id"),
-            "semantic_scholar_id": s2_id,
-            "title": external_paper.get("title", "Untitled"),
-            "publication_year": external_paper.get("publication_year"),
-            "venue": external_paper.get("venue"),
-        }
-        
-        query = """
-        MERGE (p:Paper {id: $id})
-        SET p.doi = $doi,
-            p.arxiv_id = $arxiv_id,
-            p.semantic_scholar_id = $semantic_scholar_id,
-            p.title = $title,
-            p.publication_year = $publication_year,
-            p.venue = $venue,
-            p.has_pdf = $has_pdf
-        """
-        await neo_sess.run(query, **paper_dict, has_pdf=has_pdf)
-        
-        if source_id:
-            await neo4j_service.add_citation(neo_sess, source_id, ext_id)
-        if target_id:
-            await neo4j_service.add_citation(neo_sess, ext_id, target_id)
+        key = (direction, ext_id)
+        if key in seen:
+            return False
+        seen.add(key)
+
+        db_session.add(PaperCitation(
+            paper_id=paper_id,
+            direction=direction,
+            other_id=ext_id,
+            other_title=(external_paper.get("title") or "Untitled")[:1024],
+            other_year=external_paper.get("publication_year"),
+            other_doi=external_paper.get("doi"),
+            other_arxiv_id=external_paper.get("arxiv_id"),
+            other_semantic_scholar_id=s2_id,
+            other_has_pdf=bool(external_paper.get("pdf_url")),
+        ))
+        return True
+
 
 citation_service = CitationService()

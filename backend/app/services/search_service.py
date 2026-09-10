@@ -15,8 +15,6 @@ from app.services.openalex_client import openalex_client
 from app.services.arxiv_client import arxiv_client
 from app.services.semantic_scholar_client import semantic_scholar_client
 from app.services.pdf_validator import pdf_validator
-from app.db.neo4j_client import neo4j_client
-from app.services.neo4j_service import neo4j_service
 
 logger = logging.getLogger(__name__)
 
@@ -274,18 +272,60 @@ class SearchService:
         candidates = []
         semaphore = asyncio.Semaphore(CONCURRENCY_LIMIT)
 
-        # 0. Neo4j Graph Candidates
+        # 0. Knowledge-graph candidates: papers sharing canonical concepts.
+        # This replaces the Neo4j co-citation/shared-concept traversal. The
+        # traversal was genuinely the one thing the graph database did better,
+        # so this is a reimplementation rather than a translation: a single
+        # self-join on `paper_concepts`, ranked by how many concepts two papers
+        # have in common. One hop only — deeper traversal was never used by any
+        # caller, and is the part that would justify a graph store if it were.
         try:
-            neo_sess = await neo4j_client.get_session()
-            async with neo_sess:
-                graph_candidates = await neo4j_service.get_similar_candidates(neo_sess, str(paper.id), limit=limit*2)
-                for c in graph_candidates:
-                    c["provider"] = "neo4j_graph"
-                    candidates.append(c)
-                if graph_candidates:
-                    logger.info(f"Neo4j graph candidates: found {len(graph_candidates)}")
+            from sqlalchemy import func
+
+            from app.models.knowledge import PaperConcept
+
+            mine = select(PaperConcept.concept_key).where(
+                PaperConcept.paper_id == paper.id
+            ).scalar_subquery()
+
+            shared_stmt = (
+                select(
+                    PaperConcept.paper_id,
+                    func.count(PaperConcept.concept_key).label("shared_count"),
+                )
+                .where(
+                    PaperConcept.concept_key.in_(mine),
+                    PaperConcept.paper_id != paper.id,
+                )
+                .group_by(PaperConcept.paper_id)
+                .order_by(func.count(PaperConcept.concept_key).desc())
+                .limit(limit * 2)
+            )
+            rows = (await session.execute(shared_stmt)).all()
+            if rows:
+                sibling_ids = [r[0] for r in rows]
+                sibling_papers = {
+                    p.id: p
+                    for p in await session.scalars(
+                        select(Paper).where(Paper.id.in_(sibling_ids))
+                    )
+                }
+                for pid, shared_count in rows:
+                    sib = sibling_papers.get(pid)
+                    if not sib:
+                        continue
+                    candidates.append({
+                        "id": str(sib.id),
+                        "title": sib.title,
+                        "doi": sib.doi,
+                        "arxiv_id": sib.arxiv_id,
+                        "semantic_scholar_id": sib.semantic_scholar_id,
+                        "shared_count": shared_count,
+                        "provider": "knowledge_graph",
+                    })
+                logger.info("Knowledge-graph candidates: found %d", len(rows))
         except Exception as e:
-            logger.error(f"Failed to fetch Neo4j graph candidates: {e}")
+            logger.error(f"Failed to fetch shared-concept candidates: {e}")
 
         # 1. Semantic Scholar Fallback Chain
         s2_identifier = None
@@ -480,30 +520,9 @@ class SearchService:
             await session.commit()
             await session.refresh(db_paper)
 
-        async def _sync_to_neo4j(p_dict):
-            try:
-                neo_sess = await neo4j_client.get_session()
-                async with neo_sess:
-                    await neo4j_service.upsert_paper(neo_sess, p_dict)
-            except Exception as e:
-                logger.error(f"Failed to sync paper {p_dict.get('id')} to Neo4j: {e}")
-
-        paper_dict = {
-            "id": str(db_paper.id),
-            "doi": db_paper.doi,
-            "arxiv_id": db_paper.arxiv_id,
-            "semantic_scholar_id": db_paper.semantic_scholar_id,
-            "title": db_paper.title,
-            "publication_year": db_paper.publication_year,
-            "venue": db_paper.venue,
-            "citation_count": db_paper.citation_count,
-        }
-        # asyncio holds only a weak reference to a running task, so a
-        # fire-and-forget `create_task` can be collected before it does any
-        # work. Keep a strong reference until it completes.
-        task = asyncio.create_task(_sync_to_neo4j(paper_dict))
-        _BACKGROUND_TASKS.add(task)
-        task.add_done_callback(_BACKGROUND_TASKS.discard)
+        # The Neo4j `:Paper` node mirror used to be written here. Postgres is
+        # now the only paper store, so there is nothing to mirror — one fewer
+        # background task, and one fewer way for the two stores to disagree.
 
         # Indexing is started here, awaited, rather than nested inside that
         # task: `ensure_indexed` returns as soon as the job is queued (it owns

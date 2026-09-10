@@ -11,11 +11,17 @@ retrieval scope; it supplies an identifier that this module verifies and expands
 That is what makes "Paper A cannot retrieve Paper B" an enforced invariant
 rather than a UI convention.
 
-Retrieval is a similarity scan restricted to the scoped chunks (see
-`neo4j_service.search_chunks`). It deliberately does not query the global vector
-index and filter afterwards: a global top-k followed by a filter can return
-fewer than k in-scope results — or none — while in-scope chunks that should have
-matched are discarded. Scope is applied first, ranking second.
+Retrieval ranks knowledge entries with PostgreSQL full-text search, restricted
+to the scoped papers (see `knowledge_retriever`). It deliberately applies the
+scope before ranking: a global top-k followed by a filter can return fewer than
+k in-scope results — or none — while in-scope entries that should have matched
+are discarded. Scope is applied first, ranking second.
+
+`RetrievedChunk` keeps its name and shape after the LLM-Wiki migration. What it
+carries is now a knowledge entry rather than an embedded chunk, but every
+consumer above this module — evidence formatting, citation validation, the chat
+schemas, the frontend — reads the same fields, so the wire contract did not
+move. `chunk_id` holds `KnowledgeEntry.entry_key`.
 """
 
 from __future__ import annotations
@@ -88,6 +94,14 @@ class RetrievedChunk:
     text: str
     score: float
     paper_title: Optional[str] = None
+    #: Detected section heading, new with the knowledge layer. Optional so a
+    #: caller constructing one by hand (the evaluation harness does) is not
+    #: forced to supply it.
+    section: Optional[str] = None
+    kind: str = "source"
+    #: False only for compiled prose whose evidence quote could not be located
+    #: in the paper's own text. `build_evidence_block` labels those.
+    verified: bool = True
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -97,6 +111,9 @@ class RetrievedChunk:
             "chunk_index": self.chunk_index,
             "score": round(self.score, 6),
             "paper_title": self.paper_title,
+            "section": self.section,
+            "kind": self.kind,
+            "verified": self.verified,
             "text_chars": len(self.text),
         }
 
@@ -111,6 +128,8 @@ class RetrievalResult:
     chunks: List[RetrievedChunk] = field(default_factory=list)
     candidate_count: int = 0
     latency_ms: float = 0.0
+    #: Retained so `RetrievalDebug` keeps its shape. Keyword retrieval has no
+    #: embedding, so this is 0 — it is not a silently broken dimension.
     embedding_dim: int = 0
     error: Optional[str] = None
 
@@ -210,21 +229,19 @@ class RetrievalService:
 
     async def retrieve(
         self,
+        db: AsyncSession,
         scope: RetrievalScope,
         query: str,
         top_k: Optional[int] = None,
-        neo_session: Any = None,
+        kinds: Optional[Sequence[str]] = None,
     ) -> RetrievalResult:
-        """Embed the query and return the top-k in-scope chunks.
+        """Rank in-scope knowledge entries for this question.
 
         Never raises on retrieval failure: it returns an empty result carrying
         the error, so a degraded retrieval surfaces as "no evidence" (and the
         grounding policy makes the model abstain) instead of a 500.
         """
-        from app.db.neo4j_client import neo4j_client
-        from app.services.embedding_service import embedding_service
-        from app.services.neo4j_service import neo4j_service
-        import asyncio
+        from app.services.knowledge_retriever import knowledge_retriever
 
         if top_k is None:
             top_k = (
@@ -241,47 +258,36 @@ class RetrievalService:
 
         started = time.perf_counter()
         try:
-            # Embedding is CPU-bound; keep it off the event loop. The endpoint
-            # layer used to call this synchronously, stalling every other
-            # in-flight request for the duration of the encode.
-            embedding = await asyncio.to_thread(embedding_service.embed_text, query)
-            result.embedding_dim = len(embedding)
-
-            owns_session = neo_session is None
-            if owns_session:
-                neo_session = await neo4j_client.get_session()
-                async with neo_session:
-                    rows = await neo4j_service.search_chunks(
-                        neo_session, scope.paper_ids, embedding, top_k=top_k
-                    )
-            else:
-                rows = await neo4j_service.search_chunks(
-                    neo_session, scope.paper_ids, embedding, top_k=top_k
-                )
-
+            hits = await knowledge_retriever.search(
+                db, query, scope.paper_ids, top_k=top_k, kinds=kinds
+            )
             allowed = set(scope.paper_ids)
-            for row in rows:
-                # Defence in depth: the Cypher already restricts to the scope,
-                # but a chunk whose paper_id somehow falls outside it is dropped
-                # here rather than reaching the model.
-                if str(row.get("paper_id")) not in allowed:
+            for hit in hits:
+                # Defence in depth, kept from the GraphRAG implementation: the
+                # SQL already restricts to the scope, but an entry whose
+                # paper_id falls outside it is dropped here rather than
+                # reaching the model.
+                if str(hit.paper_id) not in allowed:
                     logger.error(
-                        "Scope violation dropped: chunk %s (paper %s) not in scope %s",
-                        row.get("id"), row.get("paper_id"), scope.scope_id,
+                        "Scope violation dropped: entry %s (paper %s) not in scope %s",
+                        hit.entry_key, hit.paper_id, scope.scope_id,
                     )
                     continue
                 result.chunks.append(
                     RetrievedChunk(
-                        chunk_id=row.get("id"),
-                        paper_id=str(row.get("paper_id")),
-                        page=row.get("page"),
-                        chunk_index=row.get("chunk_index"),
-                        text=row.get("text") or "",
-                        score=float(row.get("score") or 0.0),
-                        paper_title=row.get("paper_title"),
+                        chunk_id=hit.entry_key,
+                        paper_id=str(hit.paper_id),
+                        page=hit.page,
+                        chunk_index=hit.ordinal,
+                        text=hit.body or "",
+                        score=float(hit.score or 0.0),
+                        paper_title=hit.paper_title,
+                        section=hit.section,
+                        kind=hit.kind,
+                        verified=hit.verified,
                     )
                 )
-            result.candidate_count = len(rows)
+            result.candidate_count = len(hits)
         except Exception as exc:  # noqa: BLE001 - degraded retrieval, not a crash
             logger.warning("Retrieval failed for scope %s: %s", scope.scope_id, exc)
             result.error = f"{type(exc).__name__}: {exc}"
@@ -315,9 +321,17 @@ class RetrievalService:
 
         for chunk in result.chunks:
             text = chunk.text[:max_chunk_chars]
+            # `evidence_id=` stays the first token: the citation validator and
+            # the evaluation harness both parse it positionally.
+            section = f" | section={chunk.section}" if chunk.section else ""
+            # Compiled prose whose quote could not be located is labelled in
+            # the prompt itself, so the model can weigh it accordingly rather
+            # than treating every block as equally attested.
+            trust = "" if chunk.verified else " | UNVERIFIED"
             header = (
                 f"[evidence_id={chunk.chunk_id} | paper_id={chunk.paper_id} "
-                f"| page={chunk.page if chunk.page is not None else 'n/a'}]"
+                f"| page={chunk.page if chunk.page is not None else 'n/a'}"
+                f"{section}{trust}]"
             )
             block = f"{header}\n{text}"
             if used + len(block) > max_total_chars and included:

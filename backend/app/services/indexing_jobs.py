@@ -75,3 +75,46 @@ async def ensure_indexed(paper_id: str | uuid.UUID, force: bool = False) -> str:
     _running[pid] = asyncio.create_task(_run())
     logger.info("indexing_started paper_id=%s force=%s", pid, force)
     return "queued"
+
+
+# Secondary background syncs (citations, concepts). Same dedup discipline as
+# indexing: `GET /papers/{id}/citations` fires one whenever the result is
+# empty, so three open tabs used to mean three concurrent syncs of the same
+# paper — and for concepts, three concurrent LLM calls.
+_running_syncs: Dict[str, asyncio.Task] = {}
+
+
+async def ensure_synced(kind: str, paper_id: str | uuid.UUID) -> bool:
+    """Start a citation or concept sync unless one is already in flight.
+
+    Returns whether this call started the work. Never raises: these are
+    opportunistic refreshes behind a read endpoint, and a failure to schedule
+    one must not fail the read.
+    """
+    if kind not in {"citations", "concepts"}:
+        raise ValueError(f"Unknown sync kind: {kind!r}")
+
+    key = f"{kind}:{paper_id}"
+    if key in _running_syncs and not _running_syncs[key].done():
+        logger.info("sync_job_deduplicated kind=%s paper_id=%s", kind, paper_id)
+        return False
+
+    from app.db.session import AsyncSessionLocal
+
+    async def _run() -> None:
+        try:
+            async with AsyncSessionLocal() as bg_db:
+                if kind == "citations":
+                    from app.services.citation_service import citation_service
+                    await citation_service.sync_paper_citations(bg_db, str(paper_id))
+                else:
+                    from app.services.concept_service import concept_service
+                    await concept_service.sync_paper_concepts(bg_db, str(paper_id))
+        except Exception:  # never swallow silently
+            logger.exception("sync_failed kind=%s paper_id=%s", kind, paper_id)
+        finally:
+            _running_syncs.pop(key, None)
+
+    _running_syncs[key] = asyncio.create_task(_run())
+    logger.info("sync_started kind=%s paper_id=%s", kind, paper_id)
+    return True

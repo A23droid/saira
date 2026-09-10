@@ -601,3 +601,93 @@ def build_scoped_rag_messages(
         ),
     })
     return messages
+
+
+# ── LLM-Wiki / OKF knowledge compilation ──────────────────────────────────────
+
+#: Sections of a compiled knowledge page, in the order they are rendered.
+#: Each entry is (json_key, heading). The compiler and the Markdown renderer
+#: both read this, so a page's structure is defined in exactly one place.
+KNOWLEDGE_SECTIONS: List[tuple] = [
+    ("abstract", "Abstract"),
+    ("research_problem", "Research Problem"),
+    ("key_contributions", "Key Contributions"),
+    ("methodology", "Methodology"),
+    ("dataset", "Dataset"),
+    ("experiments", "Experiments"),
+    ("results", "Results"),
+    ("limitations", "Limitations"),
+]
+
+
+def build_knowledge_compilation_messages(
+    paper: Dict[str, Any], source_blocks: str
+) -> List[Dict[str, str]]:
+    """Compile one paper's source text into a structured knowledge page.
+
+    The output is the LLM-Wiki page for this paper, and it has to survive being
+    quoted back to a user as fact — so every substantive field carries a
+    verbatim `evidence` quote drawn from the supplied text. The caller locates
+    each quote in the real source entries; anything it cannot find is marked
+    unverified rather than presented as grounded. That is the whole
+    anti-hallucination mechanism, and it only works if the model is told
+    plainly that inventing a quote is detectable.
+
+    Abstention is explicitly allowed. A paper whose PDF extraction produced no
+    Methods section should return an empty `methodology`, not a plausible
+    guess — an empty section is recoverable, a fabricated one is not.
+    """
+    context = _build_paper_context(paper)
+    section_keys = ", ".join(k for k, _ in KNOWLEDGE_SECTIONS)
+    return [
+        {
+            "role": "system",
+            "content": (
+                "You are compiling a research paper into a structured knowledge page "
+                "for a research assistant's wiki.\n\n"
+                "ABSOLUTE RULES:\n"
+                "1. Work ONLY from the SOURCE TEXT provided. Never use outside "
+                "knowledge about this paper, its authors, or its field.\n"
+                "2. Every field you fill must carry an `evidence` value: a SHORT "
+                "VERBATIM quote (10-40 words) copied exactly from the SOURCE TEXT. "
+                "Quotes are checked against the source. A quote that does not appear "
+                "in the text marks the whole field as unverified.\n"
+                "3. If the SOURCE TEXT does not cover a field, return an empty string "
+                "for its text and an empty string for its evidence. An empty section "
+                "is correct and expected. Do NOT guess, infer, or fill a gap with "
+                "typical practice in the field.\n"
+                "4. Do not copy long passages. Summarize in your own words, and let "
+                "the `evidence` quote carry the attribution.\n\n"
+                f"Fields: {section_keys}.\n\n"
+                "Also extract:\n"
+                "- `concepts`: 5-15 specific technical concepts. Reject generic words "
+                "('model', 'data', 'result', 'method', 'approach') standing alone.\n"
+                "- `methods`: named techniques, architectures or algorithms actually "
+                "used or proposed by this paper.\n"
+                "- `topics`: 2-6 broad research areas this paper belongs to.\n\n"
+                "Return ONLY valid JSON with this exact shape:\n"
+                "{\n"
+                '  "abstract":         {"text": "...", "evidence": "..."},\n'
+                '  "research_problem": {"text": "...", "evidence": "..."},\n'
+                '  "key_contributions":{"text": "...", "evidence": "..."},\n'
+                '  "methodology":      {"text": "...", "evidence": "..."},\n'
+                '  "dataset":          {"text": "...", "evidence": "..."},\n'
+                '  "experiments":      {"text": "...", "evidence": "..."},\n'
+                '  "results":          {"text": "...", "evidence": "..."},\n'
+                '  "limitations":      {"text": "...", "evidence": "..."},\n'
+                '  "concepts": [{"name": "...", "description": "...", "evidence": "..."}],\n'
+                '  "methods":  [{"name": "...", "description": "...", "evidence": "..."}],\n'
+                '  "topics":   ["..."]\n'
+                "}"
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                f"{context}\n\n"
+                f"=== SOURCE TEXT ===\n{source_blocks}\n\n"
+                "Compile the knowledge page as JSON. Remember: empty is better than "
+                "invented, and every evidence quote must appear verbatim above."
+            ),
+        },
+    ]

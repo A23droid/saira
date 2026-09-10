@@ -42,11 +42,6 @@ class Settings(BaseSettings):
     DB_POOL_SIZE: int = 5
     DB_MAX_OVERFLOW: int = 10
 
-    # --- Neo4j Graph Database --------------------------------------------
-    NEO4J_URI: str = "bolt://localhost:7687"
-    NEO4J_USER: str = "neo4j"
-    NEO4J_PASSWORD: str = "password"
-
     # --- JWT ---------------------------------------------------------------
     JWT_SECRET_KEY: str = "CHANGE_ME_IN_PRODUCTION"
     JWT_ALGORITHM: str = "HS256"
@@ -125,6 +120,31 @@ class Settings(BaseSettings):
     GROQ_PRIMARY_MODEL: str = "openai/gpt-oss-120b"
     # Extraction model: used for structured dataset/model/algorithm/metrics extraction
     GROQ_EXTRACTION_MODEL: str = "openai/gpt-oss-120b"
+
+    # --- Knowledge store (LLM-Wiki / OKF) ----------------------------------
+    # Compiled knowledge pages are Markdown blobs. `local` keeps them on disk
+    # under KNOWLEDGE_ROOT; `s3` puts them in a bucket. Nothing above
+    # app/services/knowledge_store.py knows which is in use.
+    KNOWLEDGE_STORE_BACKEND: Literal["local", "s3"] = "local"
+    KNOWLEDGE_ROOT: str = "knowledge"
+    KNOWLEDGE_S3_BUCKET: str = ""
+    KNOWLEDGE_S3_PREFIX: str = "knowledge"
+
+    # How much source text one compilation call may see, and how much output it
+    # may produce. These are provider-budget bounds, not quality knobs: the
+    # default pair (~3k input tokens + 3k output) fits inside an 8,000 TPM free
+    # tier with headroom. Raise both on a paid tier — the compiler will simply
+    # include more of the paper.
+    KNOWLEDGE_COMPILE_MAX_CHARS: int = 9000
+    KNOWLEDGE_COMPILE_MAX_TOKENS: int = 5000
+
+    # --- LLM provider ------------------------------------------------------
+    # `groq` is the current implementation. `bedrock` exists behind the same
+    # interface for the AWS deployment target; see app/services/llm_provider.py.
+    LLM_PROVIDER: Literal["groq", "bedrock"] = "groq"
+    BEDROCK_REGION: str = "us-east-1"
+    BEDROCK_PRIMARY_MODEL: str = "anthropic.claude-opus-5"
+    BEDROCK_EXTRACTION_MODEL: str = "anthropic.claude-opus-5"
 
     # --- Retrieval (RAG) ---------------------------------------------------
     # Central knobs for the shared retrieval layer. These are correctness
