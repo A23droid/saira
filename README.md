@@ -4,9 +4,18 @@ SAIRA is split into two independent projects in this repo:
 
 ```
 .
-├── backend/     FastAPI + SQLAlchemy + PostgreSQL (auth, API)
-└── frontend/    Next.js (App Router) + TypeScript (UI)
+├── backend/     FastAPI + SQLAlchemy + PostgreSQL (auth, API, knowledge)
+├── frontend/    Next.js (App Router) + TypeScript (UI)
+└── knowledge/   compiled knowledge pages (generated, gitignored)
 ```
+
+**Architecture docs**
+
+| Document | Covers |
+|---|---|
+| `RAG_ARCHITECTURE.md` | How papers become answerable knowledge, and how answers stay traceable |
+| `CLOUD_ARCHITECTURE.md` | The AWS deployment target |
+| `CLOUD_DEPLOYMENT_ARCHITECTURE.md` | Full pre-migration deployment audit |
 
 They talk to each other over HTTP — the frontend calls the backend directly
 from the browser, authenticated via HttpOnly cookies. Both need to be
@@ -24,7 +33,6 @@ unless a platform is called out explicitly.
 | Python | 3.13+ | 3.12 also works — nothing here uses 3.13-only syntax |
 | Node.js | 20+ | includes `npm` |
 | PostgreSQL | 14+ | Relational database (can use Docker) |
-| Neo4j | 5+ | Graph database (can use Docker) |
 | Docker | latest | Optional, but recommended for running databases |
 | Git | any recent version | |
 
@@ -55,19 +63,21 @@ cd saira
 
 ---
 
-## 3. Database & Graph Setup
+## 3. Database Setup
 
-SAIRA requires both PostgreSQL (for relational data) and Neo4j (for the graph).
+SAIRA needs **PostgreSQL only**. Compiled knowledge lives in the knowledge
+store (a directory, or S3) and its search index lives in Postgres, so there is
+no graph database and no vector database to run. See `RAG_ARCHITECTURE.md`.
 
 ### Option A: Docker Compose (Recommended)
 
-The easiest way to get both databases running locally is using Docker. If you have Docker Desktop installed, simply run from the project root:
+If you have Docker Desktop installed, run from the project root:
 
 ```bash
 docker-compose up -d
 ```
 
-This starts PostgreSQL on port `5432` and Neo4j on ports `7474` (HTTP) and `7687` (Bolt). You can skip to **Section 4** if you use this method.
+This starts PostgreSQL on port `5432`. You can skip to **Section 4**.
 
 ### Option B: Manual Setup
 
@@ -88,10 +98,6 @@ will prompt for one, or you can set it with:
 ```sql
 ALTER USER postgres PASSWORD 'yourpassword';
 ```
-
-**2. Neo4j:**
-Download and install Neo4j Desktop or Neo4j Community Edition (version 5+).
-Start the server and ensure the Bolt port is accessible at `localhost:7687`. Set the default user `neo4j` and password to `password`.
 
 Keep your connection details handy — you'll put them into the backend's `.env` in step 4.3.
 
@@ -184,17 +190,25 @@ AVATAR_MAX_SIZE_MB=5.0
 
 ### 4.4 Run database migrations
 
-Initialize both PostgreSQL tables and Neo4j graph constraints/indexes:
-
 ```bash
-# 1. PostgreSQL migrations
 alembic upgrade head
-
-# 2. Neo4j graph migrations
-python app/db/run_migrations.py
 ```
 
-This creates the PostgreSQL tables (`users`, `refresh_tokens`, etc.) and the Neo4j unique constraints and indexes the app needs. You should see successful execution messages with no errors.
+This creates every table the app needs — `users`, `refresh_tokens`, `papers`,
+`projects`, and the knowledge layer (`knowledge_entries`, `paper_concepts`,
+`concept_relations`, `paper_citations`). You should see successful execution
+messages with no errors.
+
+There is no second migration step: the Cypher runner was removed with Neo4j.
+
+> **Upgrading an existing database?** Papers indexed by the previous GraphRAG
+> pipeline have their chunks in Neo4j, which no longer runs. They still say
+> `indexed`, so Ask AI is offered but retrieves nothing. Reconcile them once:
+>
+> ```bash
+> venv/Scripts/python.exe scripts/recompile_knowledge.py --dry-run
+> venv/Scripts/python.exe scripts/recompile_knowledge.py
+> ```
 
 ### 4.5 Start the backend
 
