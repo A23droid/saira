@@ -116,14 +116,14 @@ def utcnow() -> str:
 def run_isolated(coro):
     """Run a coroutine in a fresh event loop, then release loop-bound resources.
 
-    The Neo4j driver and the SQLAlchemy async engine are module-level
-    singletons that bind their sockets to the event loop that created them.
+    The SQLAlchemy async engine is a module-level singleton that binds its
+    sockets to the event loop that created them.
     Under pytest each test calls `asyncio.run()`, which creates and destroys a
     loop, so a driver left connected by an earlier test is attached to a closed
     loop and the next use fails with a confusing
     `'NoneType' object has no attribute 'send'` from the proactor transport.
 
-    Disposing both singletons after each run makes every test start from a
+    Disposing the engine after each run makes every test start from a
     clean connection, which is also what "evaluation starts clean" requires.
     """
     import asyncio
@@ -132,11 +132,8 @@ def run_isolated(coro):
         try:
             return await coro
         finally:
-            try:
-                from app.db.neo4j_client import neo4j_client
-                await neo4j_client.close()
-            except Exception:
-                pass
+            # Only the SQLAlchemy engine now — the Neo4j driver it also closed
+            # was removed with the GraphRAG stack.
             try:
                 from app.db.session import engine
                 await engine.dispose()

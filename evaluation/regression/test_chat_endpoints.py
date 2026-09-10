@@ -7,7 +7,7 @@ generation keeps them deterministic and free of provider quota while still
 covering everything around it, which is where the scoping and citation bugs
 actually lived.
 
-Requires live Postgres + Neo4j; skips (never silently passes) without them.
+Requires live Postgres; skips (never silently passes) without it.
 """
 
 from __future__ import annotations
@@ -32,10 +32,9 @@ from app.main import app  # noqa: E402
 
 
 async def _probe():
-    """Find a user, an indexed paper, and (if any) a project owned by that user."""
+    """Find a user, a paper with compiled knowledge, and a project they own."""
     from sqlalchemy import select
 
-    from app.db.neo4j_client import neo4j_client
     from app.db.session import AsyncSessionLocal
     from app.models.project import Project
     from app.models.user import User
@@ -49,15 +48,17 @@ async def _probe():
         # event loop inside a test would dispose the engine the client's
         # connections are bound to.
         foreign = await db.scalar(select(Project).where(Project.user_id != user.id).limit(1))
-        await neo4j_client.connect()
-        s = await neo4j_client.get_session()
-        async with s:
-            rows = await (await s.run(
-                """
-                MATCH (p:Paper)-[:HAS_CHUNK]->(c:Chunk)
-                WHERE c.embedding IS NOT NULL
-                RETURN p.id AS id, count(c) AS n ORDER BY n DESC LIMIT 25
-                """)).data()
+        # Papers carrying compiled knowledge, most-indexed first. Replaces the
+        # Neo4j chunk-count probe.
+        from sqlalchemy import text as _sql
+
+        rows = (await db.execute(_sql("""
+            SELECT paper_id::text AS id, count(*) AS n
+            FROM knowledge_entries
+            GROUP BY paper_id
+            ORDER BY n DESC
+            LIMIT 25
+        """))).mappings().all()
 
         # A persistent paper chat session now requires the paper to be saved in
         # one of this user's projects, so the target has to be a saved paper --
@@ -92,7 +93,7 @@ except Exception:
 
 requires_data = pytest.mark.skipif(
     not CTX or not CTX.get("paper_id"),
-    reason="Postgres/Neo4j unavailable or no indexed paper — skipped, not passed.",
+    reason="Postgres unavailable or no compiled paper — skipped, not passed.",
 )
 
 
@@ -123,10 +124,8 @@ def client():
         # pooled connections against. Release them so the next module's fresh
         # loop does not inherit sockets bound to a dead one.
         async def _dispose():
-            from app.db.neo4j_client import neo4j_client
             from app.db.session import engine
             await engine.dispose()
-            await neo4j_client.close()
         # Best effort: the portal's loop is already closing, so a failure to
         # drain it must not turn teardown into a test error.
         try:

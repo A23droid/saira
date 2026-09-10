@@ -43,18 +43,27 @@ def chunk(cid, pid="P1", page=1, text="x" * 100, score=0.9, idx=0):
 
 async def _services_up() -> bool:
     try:
-        from app.db.neo4j_client import neo4j_client
-        from app.db.session import AsyncSessionLocal
         from sqlalchemy import text
+
+        from app.db.session import AsyncSessionLocal
         async with AsyncSessionLocal() as db:
             await db.execute(text("SELECT 1"))
-        await neo4j_client.connect()
-        s = await neo4j_client.get_session()
-        async with s:
-            await s.run("RETURN 1")
         return True
     except Exception:
         return False
+
+
+async def _top_papers(limit: int) -> list[str]:
+    """Papers with the most compiled knowledge entries."""
+    from sqlalchemy import text
+
+    from app.db.session import AsyncSessionLocal
+    async with AsyncSessionLocal() as db:
+        rows = (await db.execute(text("""
+            SELECT paper_id::text AS id FROM knowledge_entries
+            GROUP BY paper_id ORDER BY count(*) DESC LIMIT :n
+        """), {"n": limit})).all()
+    return [r[0] for r in rows]
 
 
 try:
@@ -63,17 +72,38 @@ except Exception:
     SERVICES_UP = False
 
 requires_services = pytest.mark.skipif(
-    not SERVICES_UP, reason="Postgres/Neo4j not reachable — integration test skipped, not passed."
+    not SERVICES_UP, reason="Postgres not reachable — integration test skipped, not passed."
 )
 
 
-# ── 4. Embedding dimension ────────────────────────────────────────────────────
+# ── 4. Retrieval query construction ───────────────────────────────────────────
+#
+# Was "embedding dimension is 384". There is no embedding model any more, so
+# the equivalent invariant is about the query the retriever actually builds:
+# a long natural-language question must still produce a usable tsquery, and
+# must not be AND-ed into something that matches nothing.
 
-def test_embedding_dimension_is_384():
-    """The Neo4j vector index is declared at 384; the model must match it."""
-    from app.services.embedding_service import embedding_service
-    vec = embedding_service.embed_text("scaled dot-product attention")
-    assert len(vec) == 384, f"expected 384 dims, got {len(vec)}"
+def test_long_questions_produce_an_or_query():
+    from app.services.knowledge_retriever import build_terms, build_tsquery
+
+    q = "What dataset and evaluation metrics does this paper use for retrieval?"
+    terms = build_terms(q)
+    assert "dataset" in terms and "retrieval" in terms
+    assert "what" not in terms and "does" not in terms, "stopwords survived"
+
+    tsq = build_tsquery(terms)
+    assert "|" in tsq, "terms were not OR-ed; a long question would match nothing"
+    assert "&" not in tsq
+
+
+def test_tsquery_is_injection_safe():
+    """Question text reaches `to_tsquery`, which has its own syntax. An
+    unescaped `!`, `&` or `:` there is a query-syntax error at best."""
+    from app.services.knowledge_retriever import build_terms, build_tsquery
+
+    tsq = build_tsquery(build_terms("what about A & B | C ! D :* (E)"))
+    for ch in "&!:*()":
+        assert ch not in tsq, f"unsafe character {ch!r} survived into the tsquery"
 
 
 # ── 3/5. Chunk metadata + evidence budgeting ──────────────────────────────────
@@ -131,15 +161,28 @@ def test_scope_carries_explicit_paper_ids():
 def test_empty_scope_returns_no_evidence():
     """An empty project must retrieve nothing rather than falling back to all."""
     scope = RetrievalScope("project", "PR-empty", [])
-    result = asyncio.run(retrieval_service.retrieve(scope, "anything"))
+    async def _empty():
+        from app.db.session import AsyncSessionLocal
+        async with AsyncSessionLocal() as db:
+            return await retrieval_service.retrieve(db, scope, "anything")
+
+    result = run_isolated(_empty())
     assert result.chunks == []
     assert result.error == "empty_scope"
 
 
-def test_search_chunks_returns_nothing_for_empty_scope():
-    from app.services.neo4j_service import neo4j_service
-    out = asyncio.run(neo4j_service.search_chunks(None, [], [0.0] * 384, 5))
-    assert out == []
+def test_search_returns_nothing_for_empty_scope():
+    """The retriever short-circuits an empty scope rather than querying with
+    an empty paper list, which in SQL would match nothing but still spend a
+    round trip — and, if the WHERE clause were ever dropped, everything."""
+    from app.services.knowledge_retriever import knowledge_retriever
+
+    async def run():
+        from app.db.session import AsyncSessionLocal
+        async with AsyncSessionLocal() as db:
+            return await knowledge_retriever.search(db, "anything", [], top_k=5)
+
+    assert run_isolated(run()) == []
 
 
 # ── 6/7. Vector retrieval + empty handling (integration) ──────────────────────
@@ -150,26 +193,17 @@ def test_paper_scope_retrieval_is_isolated():
     from app.db.session import AsyncSessionLocal
 
     async def run():
-        from app.db.neo4j_client import neo4j_client
-        await neo4j_client.connect()
-        s = await neo4j_client.get_session()
-        async with s:
-            rows = await (await s.run(
-                """
-                MATCH (p:Paper)-[:HAS_CHUNK]->(c:Chunk)
-                WHERE c.embedding IS NOT NULL
-                RETURN p.id AS id, count(c) AS n ORDER BY n DESC LIMIT 2
-                """)).data()
-        if len(rows) < 2:
-            pytest.skip("need two indexed papers")
+        ids = await _top_papers(2)
+        if len(ids) < 2:
+            pytest.skip("need two papers with compiled knowledge")
         async with AsyncSessionLocal() as db:
-            for row in rows:
-                scope = await retrieval_service.resolve_paper_scope(db, row["id"])
-                res = await retrieval_service.retrieve(scope, "what method is used?")
-                assert res.chunks, f"no chunks for {row['id']}"
+            for pid in ids:
+                scope = await retrieval_service.resolve_paper_scope(db, pid)
+                res = await retrieval_service.retrieve(db, scope, "what method is used?")
+                assert res.chunks, f"no evidence for {pid}"
                 for c in res.chunks:
-                    assert c.paper_id == row["id"], (
-                        f"SCOPE LEAK: chunk from {c.paper_id} in scope {row['id']}")
+                    assert c.paper_id == pid, (
+                        f"SCOPE LEAK: entry from {c.paper_id} in scope {pid}")
 
     run_isolated(run())
 
@@ -180,22 +214,15 @@ def test_retrieved_chunks_carry_full_metadata():
     from app.db.session import AsyncSessionLocal
 
     async def run():
-        from app.db.neo4j_client import neo4j_client
-        await neo4j_client.connect()
-        s = await neo4j_client.get_session()
-        async with s:
-            row = await (await s.run(
-                """
-                MATCH (p:Paper)-[:HAS_CHUNK]->(c:Chunk)
-                WHERE c.embedding IS NOT NULL
-                RETURN p.id AS id, count(c) AS n ORDER BY n DESC LIMIT 1
-                """)).single()
-        if not row:
-            pytest.skip("no indexed papers")
+        ids = await _top_papers(1)
+        if not ids:
+            pytest.skip("no papers with compiled knowledge")
         async with AsyncSessionLocal() as db:
-            scope = await retrieval_service.resolve_paper_scope(db, row["id"])
-            res = await retrieval_service.retrieve(scope, "attention mechanism")
-            assert res.embedding_dim == 384
+            scope = await retrieval_service.resolve_paper_scope(db, ids[0])
+            res = await retrieval_service.retrieve(db, scope, "attention mechanism")
+            # Keyword retrieval has no embedding; the field is retained for
+            # wire compatibility and must read 0, not a stale 384.
+            assert res.embedding_dim == 0
             for c in res.chunks:
                 assert c.chunk_id and c.paper_id and c.text
                 assert isinstance(c.score, float) and 0.0 <= c.score <= 1.0
@@ -249,7 +276,7 @@ def test_project_scope_contains_only_member_papers():
             expected = {str(r[0]) for r in rows}
             assert set(scope.paper_ids) == expected
             if scope.paper_ids:
-                res = await retrieval_service.retrieve(scope, "method")
+                res = await retrieval_service.retrieve(db, scope, "method")
                 for c in res.chunks:
                     assert c.paper_id in expected, "project scope leak"
 

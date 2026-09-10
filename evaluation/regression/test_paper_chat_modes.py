@@ -102,10 +102,8 @@ def client():
             app.dependency_overrides[get_current_user] = previous
 
         async def _dispose():
-            from app.db.neo4j_client import neo4j_client
             from app.db.session import engine
             await engine.dispose()
-            await neo4j_client.close()
         try:
             asyncio.run(_dispose())
         except Exception:

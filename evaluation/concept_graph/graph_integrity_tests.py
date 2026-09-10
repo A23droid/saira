@@ -29,26 +29,38 @@ from app.services.concept_service import (  # noqa: E402
 from app.services.prompts import CONCEPT_RELATION_TYPES  # noqa: E402
 
 
-async def _neo4j_up() -> bool:
+async def _db_up() -> bool:
     try:
-        from app.db.neo4j_client import neo4j_client
-        await neo4j_client.connect()
-        s = await neo4j_client.get_session()
-        async with s:
-            await s.run("RETURN 1")
+        from sqlalchemy import text
+
+        from app.db.session import AsyncSessionLocal
+        async with AsyncSessionLocal() as db:
+            await db.execute(text("SELECT 1"))
         return True
     except Exception:
         return False
 
 
 try:
-    NEO4J_UP = run_isolated(_neo4j_up())
+    DB_UP = run_isolated(_db_up())
 except Exception:
-    NEO4J_UP = False
+    DB_UP = False
 
-requires_neo4j = pytest.mark.skipif(
-    not NEO4J_UP, reason="Neo4j not reachable — integration test skipped, not passed."
+requires_db = pytest.mark.skipif(
+    not DB_UP, reason="Postgres not reachable — integration test skipped, not passed."
 )
+
+
+async def _a_paper_with_concepts(limit: int = 1) -> list[str]:
+    """Paper IDs that actually have concepts stored."""
+    from sqlalchemy import text
+
+    from app.db.session import AsyncSessionLocal
+    async with AsyncSessionLocal() as db:
+        rows = (await db.execute(text(
+            "SELECT DISTINCT paper_id::text FROM paper_concepts LIMIT :n"
+        ), {"n": limit})).all()
+    return [r[0] for r in rows]
 
 
 # ── 15. Normalization ─────────────────────────────────────────────────────────
@@ -194,135 +206,140 @@ def test_unlocatable_evidence_yields_empty_provenance_not_a_guess():
 
 
 # ── 18/19/20/21. Live-graph invariants ────────────────────────────────────────
+#
+# These asserted the same properties against Neo4j before the LLM-Wiki
+# migration. The store changed; the invariants did not. Two of them changed
+# meaning slightly, and say so where they do.
 
-@requires_neo4j
+@requires_db
 def test_concepts_have_paper_scoped_edges():
-    """Invariant 18: every concept in a paper's view has an edge from that paper."""
-    from app.db.neo4j_client import neo4j_client
-    from app.services.neo4j_service import neo4j_service
+    """Invariant 18: every concept in a paper's view is asserted by that paper."""
+    import uuid as _uuid
+
+    from sqlalchemy import text
+
+    from app.db.session import AsyncSessionLocal
+    from app.services.graph_service import graph_service
 
     async def run():
-        s = await neo4j_client.get_session()
-        async with s:
-            row = await (await s.run(
-                "MATCH (p:Paper)-[:HAS_CONCEPT]->() RETURN p.id AS id LIMIT 1")).single()
-            if not row:
-                pytest.skip("no concept graph in Neo4j yet")
-            pid = row["id"]
-            g = await neo4j_service.get_paper_concept_graph(s, pid)
-            assert g["concepts"], "paper has HAS_CONCEPT but view is empty"
-            ids = [c["id"] for c in g["concepts"]]
-            verified = await (await s.run(
-                """
-                MATCH (p:Paper {id:$pid})-[:HAS_CONCEPT]->(c:Concept)
-                WHERE c.id IN $ids RETURN count(c) AS n
-                """, pid=pid, ids=ids)).single()
-            assert verified["n"] == len(ids)
+        ids = await _a_paper_with_concepts()
+        if not ids:
+            pytest.skip("no concepts stored yet")
+        pid = ids[0]
+        async with AsyncSessionLocal() as db:
+            g = await graph_service.get_paper_concept_graph(db, _uuid.UUID(pid))
+            assert g["concepts"], "paper has concept rows but view is empty"
+            keys = [c["id"] for c in g["concepts"]]
+            n = (await db.execute(text(
+                "SELECT count(*) FROM paper_concepts "
+                "WHERE paper_id = CAST(:p AS uuid) AND concept_key = ANY(:k)"
+            ), {"p": pid, "k": keys})).scalar()
+        assert n == len(keys)
 
     run_isolated(run())
 
 
-@requires_neo4j
+@requires_db
 def test_paper_graphs_are_isolated():
     """Invariant 18: Paper A's view never contains a relation asserted by Paper B."""
-    from app.db.neo4j_client import neo4j_client
-    from app.services.neo4j_service import neo4j_service
+    import uuid as _uuid
+
+    from app.db.session import AsyncSessionLocal
+    from app.services.graph_service import graph_service
 
     async def run():
-        s = await neo4j_client.get_session()
-        async with s:
-            rows = await (await s.run(
-                "MATCH (p:Paper)-[:HAS_CONCEPT]->() RETURN DISTINCT p.id AS id LIMIT 2")).data()
-            if len(rows) < 2:
-                pytest.skip("need two papers with concepts")
-            a = await neo4j_service.get_paper_concept_graph(s, rows[0]["id"])
-            b = await neo4j_service.get_paper_concept_graph(s, rows[1]["id"])
-            # Every relation surfaced for a paper must be well-formed and
-            # scoped: get_paper_concept_graph filters on {paper_id: $paper_id},
-            # so a foreign assertion cannot appear here.
-            for g in (a, b):
-                for rel in g["relations"]:
-                    assert rel["source"] and rel["target"], "malformed relation"
-            assert {c["id"] for c in a["concepts"]} != {c["id"] for c in b["concepts"]}, \
-                "two different papers produced identical concept sets"
+        ids = await _a_paper_with_concepts(2)
+        if len(ids) < 2:
+            pytest.skip("need two papers with concepts")
+        async with AsyncSessionLocal() as db:
+            a = await graph_service.get_paper_concept_graph(db, _uuid.UUID(ids[0]))
+            b = await graph_service.get_paper_concept_graph(db, _uuid.UUID(ids[1]))
+        for g in (a, b):
+            for rel in g["relations"]:
+                assert rel["source"] and rel["target"], "malformed relation"
+        assert {c["id"] for c in a["concepts"]} != {c["id"] for c in b["concepts"]}, (
+            "two different papers produced identical concept sets")
 
     run_isolated(run())
 
 
-@requires_neo4j
+@requires_db
 def test_reingestion_of_identical_payload_is_idempotent():
-    """Invariant 20: writing the same concepts twice must not grow the graph."""
-    from app.db.neo4j_client import neo4j_client
-    from app.services.neo4j_service import neo4j_service
+    """Invariant 20: re-writing a paper's concepts must not grow the store.
+
+    The Neo4j version re-ran `upsert_concepts` and compared node counts. The
+    Postgres writer replaces the paper's rows rather than merging, and a unique
+    constraint on (paper_id, concept_key) makes duplication impossible — so
+    this now asserts that constraint actually holds in the live data.
+    """
+    from sqlalchemy import text
+
+    from app.db.session import AsyncSessionLocal
 
     async def run():
-        s = await neo4j_client.get_session()
-        async with s:
-            row = await (await s.run(
-                "MATCH (p:Paper)-[:HAS_CONCEPT]->() RETURN p.id AS id LIMIT 1")).single()
-            if not row:
-                pytest.skip("no concept graph yet")
-            pid = row["id"]
-            before = await neo4j_service.graph_stats(s)
-            g = await neo4j_service.get_paper_concept_graph(s, pid)
-
-            concepts = [{
-                "id": c["id"], "name": c["name"],
-                "aliases": c.get("aliases") or [c["name"]],
-                "importance": c.get("importance") or 0.5,
-                "evidence": c.get("evidence") or "",
-                "pages": c.get("pages") or [], "chunk_ids": c.get("chunk_ids") or [],
-            } for c in g["concepts"]]
-            relations = [{
-                "source_id": r["source"], "target_id": r["target"], "type": r["type"],
-                "evidence": r.get("evidence") or "", "pages": r.get("pages") or [],
-                "chunk_ids": r.get("chunk_ids") or [],
-            } for r in g["relations"]]
-
-            await neo4j_service.upsert_concepts(s, pid, concepts)
-            await neo4j_service.upsert_concept_relations(s, pid, relations)
-            after = await neo4j_service.graph_stats(s)
-
-        assert after["concepts"] == before["concepts"], "concept nodes duplicated"
-        assert after["has_concept"] == before["has_concept"], "paper edges duplicated"
-        assert after["relations"] == before["relations"], "relations duplicated"
+        ids = await _a_paper_with_concepts()
+        if not ids:
+            pytest.skip("no concepts stored yet")
+        pid = ids[0]
+        async with AsyncSessionLocal() as db:
+            stored = (await db.execute(text(
+                "SELECT count(*) FROM paper_concepts WHERE paper_id = CAST(:p AS uuid)"
+            ), {"p": pid})).scalar()
+            dupes = (await db.execute(text(
+                "SELECT count(*) FROM (SELECT concept_key FROM paper_concepts "
+                "WHERE paper_id = CAST(:p AS uuid) GROUP BY concept_key "
+                "HAVING count(*) > 1) d"
+            ), {"p": pid})).scalar()
+        assert dupes == 0, f"{dupes} concept keys duplicated within one paper"
+        assert stored > 0
 
     run_isolated(run())
 
 
-@requires_neo4j
+@requires_db
 def test_graph_has_no_orphan_concepts():
-    """Invariant 20: clearing a paper's edges must not leave dangling nodes."""
-    from app.db.neo4j_client import neo4j_client
-    from app.services.neo4j_service import neo4j_service
+    """Invariant 20: no concept row may reference a paper that no longer exists.
+
+    In Neo4j a shared `:Concept` node could outlive every paper referencing it,
+    so the old check counted stranded nodes. The relational model has no
+    standalone concept row to strand — a concept exists only as a paper's
+    assertion, and the FK cascade removes it with the paper. What can still go
+    wrong is a row pointing at a missing paper, so that is what is asserted.
+    """
+    from sqlalchemy import text
+
+    from app.db.session import AsyncSessionLocal
 
     async def run():
-        s = await neo4j_client.get_session()
-        async with s:
-            stats = await neo4j_service.graph_stats(s)
-        if stats.get("concepts", 0) == 0:
-            pytest.skip("no concept graph yet")
-        assert stats["orphan_concepts"] == 0, (
-            f"{stats['orphan_concepts']} Concept nodes have no paper")
+        async with AsyncSessionLocal() as db:
+            total = (await db.execute(
+                text("SELECT count(*) FROM paper_concepts"))).scalar()
+            orphans = (await db.execute(text(
+                "SELECT count(*) FROM paper_concepts pc "
+                "LEFT JOIN papers p ON p.id = pc.paper_id WHERE p.id IS NULL"
+            ))).scalar()
+        if total == 0:
+            pytest.skip("no concepts stored yet")
+        assert orphans == 0, f"{orphans} concept rows reference a missing paper"
 
     run_isolated(run())
 
 
-@requires_neo4j
+@requires_db
 def test_graph_api_returns_referentially_intact_structure():
     """Invariant 21: every edge endpoint must exist in nodes (no phantom nodes)."""
-    from app.db.neo4j_client import neo4j_client
-    from app.services.neo4j_service import neo4j_service
+    import uuid as _uuid
+
+    from app.db.session import AsyncSessionLocal
+    from app.services.graph_service import graph_service
 
     async def run():
-        s = await neo4j_client.get_session()
-        async with s:
-            row = await (await s.run(
-                "MATCH (p:Paper)-[:HAS_CONCEPT]->() RETURN p.id AS id LIMIT 1")).single()
-            if not row:
-                pytest.skip("no concept graph yet")
-            pid = row["id"]
-            g = await neo4j_service.get_paper_concept_graph(s, pid)
+        ids = await _a_paper_with_concepts()
+        if not ids:
+            pytest.skip("no concepts stored yet")
+        pid = ids[0]
+        async with AsyncSessionLocal() as db:
+            g = await graph_service.get_paper_concept_graph(db, _uuid.UUID(pid))
 
         node_ids = {pid} | {c["id"] for c in g["concepts"]}
         edges = [(pid, c["id"]) for c in g["concepts"]]
@@ -333,15 +350,15 @@ def test_graph_api_returns_referentially_intact_structure():
     run_isolated(run())
 
 
-@requires_neo4j
+@requires_db
 def test_project_graph_scope_excludes_foreign_papers():
     """Invariant 19: a project graph contains only that project's papers."""
     from sqlalchemy import select
-    from app.db.neo4j_client import neo4j_client
+
     from app.db.session import AsyncSessionLocal
     from app.models.project import Project
     from app.models.project_paper import ProjectPaper
-    from app.services.neo4j_service import neo4j_service
+    from app.services.graph_service import graph_service
 
     async def run():
         async with AsyncSessionLocal() as db:
@@ -350,17 +367,18 @@ def test_project_graph_scope_excludes_foreign_papers():
                 pytest.skip("no projects")
             rows = await db.execute(
                 select(ProjectPaper.paper_id).where(ProjectPaper.project_id == project.id))
-            ids = [str(r[0]) for r in rows]
-        if not ids:
-            pytest.skip("project has no papers")
-        s = await neo4j_client.get_session()
-        async with s:
-            g = await neo4j_service.get_project_concept_graph(s, ids)
-        allowed = set(ids)
-        for c in g["concepts"]:
-            for pid in (c.get("paper_ids") or []):
-                assert pid in allowed, f"foreign paper {pid} in project graph"
-        for r in g["relations"]:
-            assert r["paper_id"] in allowed, f"foreign relation from {r['paper_id']}"
+            ids = {str(r[0]) for r in rows}
+            if not ids:
+                pytest.skip("project has no papers")
+            g = await graph_service.get_project_concept_graph(db, project.id)
+
+        paper_nodes = {n["id"] for n in g["nodes"] if n["type"] == "paper"}
+        assert paper_nodes <= ids, (
+            f"foreign paper(s) in project graph: {paper_nodes - ids}")
+
+        node_ids = {n["id"] for n in g["nodes"]}
+        for e in g["edges"]:
+            src, tgt = e["source"], e["target"]
+            assert src in node_ids and tgt in node_ids, f"phantom edge {src}->{tgt}"
 
     run_isolated(run())

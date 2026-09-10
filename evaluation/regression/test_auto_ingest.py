@@ -96,10 +96,8 @@ def client():
             app.dependency_overrides[get_current_user] = previous
 
         async def _dispose():
-            from app.db.neo4j_client import neo4j_client
             from app.db.session import engine
             await engine.dispose()
-            await neo4j_client.close()
         try:
             asyncio.run(_dispose())
         except Exception:
@@ -199,19 +197,27 @@ async def _paper_status(paper_id: str):
         return p.indexing_status, p.indexing_error
 
 
-async def _neo4j_chunk_stats(paper_id: str) -> dict:
-    from app.db.neo4j_client import neo4j_client
-    await neo4j_client.connect()
-    s = await neo4j_client.get_session()
-    async with s:
-        row = await (await s.run(
-            """
-            MATCH (p:Paper {id: $pid})-[:HAS_CHUNK]->(c:Chunk)
-            RETURN count(c) AS n,
-                   count(c.embedding) AS embedded,
-                   count(DISTINCT c.id) AS distinct_ids,
-                   collect(DISTINCT c.paper_id) AS paper_ids
-            """, pid=paper_id)).single()
+async def _knowledge_stats(paper_id: str) -> dict:
+    """Count this paper's knowledge entries.
+
+    Replaces the Neo4j chunk count. `embedded` is retained as a key so the
+    assertions below keep their shape, but it now means "entries carrying
+    provenance" — the knowledge layer has no embeddings, and the property the
+    old assertion actually cared about was "every stored unit is usable".
+    """
+    from sqlalchemy import text
+
+    from app.db.session import AsyncSessionLocal
+
+    async with AsyncSessionLocal() as db:
+        row = (await db.execute(text("""
+            SELECT count(*)                                        AS n,
+                   count(*) FILTER (WHERE provenance IS NOT NULL)  AS embedded,
+                   count(DISTINCT entry_key)                       AS distinct_ids,
+                   array_agg(DISTINCT paper_id::text)              AS paper_ids
+            FROM knowledge_entries
+            WHERE paper_id = CAST(:pid AS uuid)
+        """), {"pid": paper_id})).mappings().first()
     return dict(row) if row else {"n": 0}
 
 
@@ -259,7 +265,7 @@ def test_end_to_end_search_to_ask_ai(client):
         )
     assert st["ask_ai_ready"] is True
 
-    stats = _in_app_loop(client, _neo4j_chunk_stats, paper_id)
+    stats = _in_app_loop(client, _knowledge_stats, paper_id)
     assert stats["n"] > 0, "indexed but no chunks exist"
     assert stats["embedded"] == stats["n"], "chunks missing embeddings"
     assert stats["distinct_ids"] == stats["n"], "duplicate chunk ids"
@@ -298,7 +304,7 @@ def test_end_to_end_search_to_ask_ai(client):
     body = r.json()
     assert body["indexing_status"] == "indexed"
     assert body["ask_ai_ready"] is True
-    after = _in_app_loop(client, _neo4j_chunk_stats, paper_id)
+    after = _in_app_loop(client, _knowledge_stats, paper_id)
     assert after["n"] == stats["n"], "adding to a second project duplicated chunks"
 
 
@@ -441,33 +447,34 @@ def test_non_pdf_response_marks_pdf_unavailable(client, body):
 
 
 @requires_db
-def test_embedding_failure_is_reported_as_indexing_failed(client):
-    """TEST 9: a processing failure is distinct from an acquisition failure."""
-    from app.services.research_indexer import research_indexer
+def test_text_extraction_failure_is_reported_as_indexing_failed(client):
+    """TEST 9: a processing failure is distinct from an acquisition failure.
+
+    Was "embedding failure". There is no embedding step any more; the
+    equivalent processing failure is text extraction, which is what a scanned
+    or encrypted PDF produces. The invariant is unchanged: the file was
+    obtained, so this must be `failed`, never `pdf_unavailable`.
+    """
+    from app.services import knowledge_compiler as kc
 
     hit = _discover_arxiv_paper(client, 4)
     paper_id = _ingest(client, hit)["paper"]["id"]
     _wait_for_terminal(client, paper_id)
 
     async def _run():
-        from sqlalchemy import select
+        def boom(pdf_bytes):
+            raise kc.CompilationError("text extraction exploded")
 
-        from app.db.session import AsyncSessionLocal
-        from app.models.paper import Paper
-
-        def boom(texts):
-            raise RuntimeError("embedding backend exploded")
-
-        with patch.object(research_indexer, "_embed_chunks", boom):
+        with patch.object(kc, "extract_source_units", boom):
             await _reindex_and_wait(paper_id)
         return await _paper_status(paper_id)
 
     status, error = _in_app_loop(client, _run)
     if status == "pdf_unavailable":
-        pytest.skip("PDF could not be fetched, so the embedding path was never reached")
+        pytest.skip("PDF could not be fetched, so the processing path was never reached")
     assert status == "failed", f"expected failed, got {status}"
     assert not is_ask_ai_ready(status)
-    assert error and "embedding backend exploded" in error
+    assert error and "text extraction exploded" in error
 
 
 # -- ingestion is started by saving, not by opening ----------------------------
