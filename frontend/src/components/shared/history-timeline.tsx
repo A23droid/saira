@@ -11,7 +11,7 @@ import {
 } from "lucide-react";
 import { HistoryEvent, HistoryEventType } from "@/lib/types";
 
-const iconByType: Record<HistoryEventType, LucideIcon> = {
+const iconByType: Record<string, LucideIcon> = {
   search: Search,
   view_paper: FileText,
   view_project: FolderKanban,

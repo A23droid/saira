@@ -80,15 +80,29 @@ async def get_indexing_status(
         raise HTTPException(status_code=404, detail="Paper not found")
 
     status_now = paper.indexing_status or "not_indexed"
-    if retry and status_now in FAILED_STATES:
+
+    # A paper can be `indexed` and still carry an error: compilation degrades
+    # to source-text-only when the LLM call fails, which leaves the paper
+    # answerable but without its compiled knowledge page. That used to be
+    # permanent — only FAILED_STATES were retryable — so a transient provider
+    # outage cost the paper its wiki page forever.
+    degraded = status_now == "indexed" and bool(paper.indexing_error)
+    retryable = status_now in FAILED_STATES or degraded
+
+    if retry and retryable:
         status_now = await ensure_indexed(paper_id, force=True)
+        paper = await paper_service.get_paper_by_id(session=db, paper_id=paper_id)
+        degraded = (paper.indexing_status == "indexed") and bool(paper.indexing_error)
 
     return {
         "paper_id": str(paper.id),
         "indexing_status": status_now,
         "indexing_error": paper.indexing_error,
         "ask_ai_ready": is_ask_ai_ready(status_now),
-        "can_retry": status_now in FAILED_STATES,
+        "can_retry": status_now in FAILED_STATES or degraded,
+        # Answerable from the paper's own text, but the compiled overview is
+        # missing. The UI can offer a retry without implying the paper is broken.
+        "degraded": degraded,
     }
 
 

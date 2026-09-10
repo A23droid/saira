@@ -131,12 +131,25 @@ class Settings(BaseSettings):
     KNOWLEDGE_S3_PREFIX: str = "knowledge"
 
     # How much source text one compilation call may see, and how much output it
-    # may produce. These are provider-budget bounds, not quality knobs: the
-    # default pair (~3k input tokens + 3k output) fits inside an 8,000 TPM free
-    # tier with headroom. Raise both on a paid tier — the compiler will simply
-    # include more of the paper.
-    KNOWLEDGE_COMPILE_MAX_CHARS: int = 9000
+    # may produce. These are provider-budget bounds, not quality knobs.
+    #
+    # The pair must fit the provider's per-minute token budget INCLUDING the
+    # system prompt and the reserved output. Measured against an 8,000 TPM free
+    # tier: 6,000 source chars renders to a ~9,000-char prompt (~2,250 tokens),
+    # plus 5,000 reserved output = ~7,250. An earlier 9,000/5,000 pair measured
+    # ~8,000 and failed intermittently — sometimes 429, sometimes truncated JSON
+    # from a reasoning model whose chain of thought is billed against the same
+    # budget. Raise both on a paid tier; the compiler will include more of the
+    # paper.
+    KNOWLEDGE_COMPILE_MAX_CHARS: int = 6000
     KNOWLEDGE_COMPILE_MAX_TOKENS: int = 5000
+
+    # How many papers may be compiled at once. The LLM rate limit is an
+    # account-wide resource, so two concurrent compilations do not take half
+    # the time each — they take the same time and one of them gets a truncated
+    # reply or a 429. Ingestion is a background job, so serialising it costs
+    # nothing a user waits on. Raise this only alongside a higher provider tier.
+    KNOWLEDGE_COMPILE_CONCURRENCY: int = 1
 
     # --- LLM provider ------------------------------------------------------
     # `groq` is the current implementation. `bedrock` exists behind the same

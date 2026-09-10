@@ -25,6 +25,24 @@ logger = logging.getLogger(__name__)
 # garbage collected mid-flight (asyncio only holds a weak one).
 _running: Dict[str, asyncio.Task] = {}
 
+# Compilation is gated on a shared provider token budget, not on local CPU, so
+# running two at once makes both slower and one of them fail — measured: two
+# concurrent ingests on an 8,000 TPM tier produced a truncated JSON reply for
+# both papers, while the same two run in sequence both succeeded. Dedup stops
+# the SAME paper being indexed twice; this stops DIFFERENT papers colliding.
+#
+# Created lazily: a Semaphore binds to the running event loop, and building one
+# at import time attaches it to whichever loop happened to import the module.
+_compile_gate: Optional[asyncio.Semaphore] = None
+
+
+def _gate() -> asyncio.Semaphore:
+    global _compile_gate
+    if _compile_gate is None:
+        from app.core.config import settings
+        _compile_gate = asyncio.Semaphore(max(1, settings.KNOWLEDGE_COMPILE_CONCURRENCY))
+    return _compile_gate
+
 # Terminal states in which re-indexing is pointless without an explicit retry.
 DONE_STATES = {"indexed"}
 FAILED_STATES = {"failed", "pdf_unavailable"}
@@ -65,8 +83,9 @@ async def ensure_indexed(paper_id: str | uuid.UUID, force: bool = False) -> str:
     async def _run() -> None:
         from app.services.research_indexer import research_indexer
         try:
-            async with AsyncSessionLocal() as bg_db:
-                await research_indexer.index_paper(bg_db, pid, force=force)
+            async with _gate():
+                async with AsyncSessionLocal() as bg_db:
+                    await research_indexer.index_paper(bg_db, pid, force=force)
         except Exception:  # never swallow silently
             logger.exception("indexing_failed paper_id=%s", pid)
         finally:

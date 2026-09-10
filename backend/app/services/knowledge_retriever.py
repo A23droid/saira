@@ -134,6 +134,88 @@ def build_terms(query: str) -> List[str]:
     return terms
 
 
+#: Question intent → section names worth matching. Section headings sit at
+#: weight B in the tsvector, so adding one to the query pulls in that whole
+#: section of every in-scope paper.
+#:
+#: This exists because of a real failure found in end-to-end testing: "What
+#: problem does this paper solve?" retrieved NOTHING. Every content word in it
+#: is either a stopword or absent from the paper's own vocabulary — papers
+#: state their problem, they do not use the word "problem". Pure keyword
+#: retrieval cannot bridge that on its own, and it is the case people ask
+#: first. Mapping intent onto the section metadata the compiler already
+#: produces is far cheaper than reintroducing an embedding model, and it fails
+#: safe: at worst the reader gets the Introduction.
+_INTENT_SECTIONS: Dict[str, tuple[str, ...]] = {
+    "problem": ("Introduction", "Abstract"),
+    "solve": ("Introduction", "Abstract"),
+    "solves": ("Introduction", "Abstract"),
+    "motivation": ("Introduction",),
+    "about": ("Abstract", "Introduction"),
+    "summary": ("Abstract", "Conclusion"),
+    "summarize": ("Abstract", "Conclusion"),
+    "contribution": ("Introduction", "Abstract"),
+    "contributions": ("Introduction", "Abstract"),
+    "method": ("Methodology",),
+    "methods": ("Methodology",),
+    "methodology": ("Methodology",),
+    "approach": ("Methodology",),
+    "technique": ("Methodology",),
+    "architecture": ("Methodology",),
+    "work": ("Methodology",),
+    "works": ("Methodology",),
+    "dataset": ("Dataset", "Experiments"),
+    "datasets": ("Dataset", "Experiments"),
+    "data": ("Dataset", "Experiments"),
+    "corpus": ("Dataset",),
+    "benchmark": ("Dataset", "Experiments"),
+    "experiment": ("Experiments",),
+    "experiments": ("Experiments",),
+    "evaluate": ("Experiments", "Results"),
+    "evaluated": ("Experiments", "Results"),
+    "evaluation": ("Experiments", "Results"),
+    "result": ("Results",),
+    "results": ("Results",),
+    "finding": ("Results",),
+    "findings": ("Results",),
+    "performance": ("Results",),
+    "accuracy": ("Results",),
+    "outcome": ("Results",),
+    "limitation": ("Limitations", "Discussion", "Conclusion"),
+    "limitations": ("Limitations", "Discussion", "Conclusion"),
+    "weakness": ("Limitations", "Discussion"),
+    "drawback": ("Limitations", "Discussion"),
+    "future": ("Conclusion",),
+    "conclusion": ("Conclusion",),
+    "conclude": ("Conclusion",),
+}
+
+#: Below this many content terms, a question is generic enough that section
+#: expansion is the difference between an answer and an abstention. Above it,
+#: the question carries its own vocabulary and expansion would only add noise.
+_EXPAND_BELOW_TERMS = 5
+
+
+def expand_with_sections(query: str, terms: Sequence[str]) -> List[str]:
+    """Add section names implied by the question's intent.
+
+    Applied only to short/generic questions — a question with enough of its own
+    content words ranks better without the extra noise.
+    """
+    if len(terms) >= _EXPAND_BELOW_TERMS:
+        return list(terms)
+
+    lowered = (query or "").lower()
+    extra: List[str] = []
+    for word, sections in _INTENT_SECTIONS.items():
+        if re.search(rf"\b{re.escape(word)}\b", lowered):
+            for section in sections:
+                for piece in section.lower().split():
+                    if piece not in terms and piece not in extra:
+                        extra.append(piece)
+    return list(terms) + extra
+
+
 def build_tsquery(terms: Sequence[str]) -> str:
     """OR the terms together.
 
@@ -260,7 +342,7 @@ class PostgresKnowledgeRetriever(KnowledgeRetriever):
         terms = build_terms(query)
         rows: List[Any] = []
         if terms:
-            params["tsquery"] = build_tsquery(terms)
+            params["tsquery"] = build_tsquery(expand_with_sections(query, terms))
             stmt = text(self._SELECT.format(kind_clause=kind_clause))
             try:
                 result = await db.execute(stmt, params)

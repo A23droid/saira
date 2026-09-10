@@ -235,10 +235,19 @@ class GroqService:
         messages: List[Dict[str, str]],
         temperature: float = 0.2,
         max_tokens: int = 4096,
+        _allow_truncation_retry: bool = True,
     ) -> Dict[str, Any]:
         """
         Like chat_complete but expects JSON output and parses + validates it.
         Reasoning blocks are stripped before JSON parsing.
+
+        A reply that does not close its top-level object was cut off by the
+        token budget, not malformed by the model. `chat_complete` only retries
+        when the budget is exhausted before ANY content is produced; a
+        half-written JSON object is a successful call whose output happens to
+        be unusable, so it needs its own retry. Without it the caller sees
+        "not valid JSON" and has no way to tell a truncation from a model that
+        genuinely cannot follow the schema.
 
         Returns:
             Parsed JSON dict.
@@ -265,9 +274,25 @@ class GroqService:
         try:
             return json.loads(cleaned)
         except json.JSONDecodeError as exc:
+            truncated = bool(cleaned) and not cleaned.rstrip().endswith(("}", "]"))
+            if truncated and _allow_truncation_retry and max_tokens < _MAX_TOKEN_CEILING:
+                retry_budget = min(int(max_tokens * 1.6), _MAX_TOKEN_CEILING)
+                logger.warning(
+                    "JSON reply truncated at max_tokens=%d (%d chars, no closing "
+                    "brace); retrying once with max_tokens=%d",
+                    max_tokens, len(cleaned), retry_budget,
+                )
+                return await self.chat_complete_json(
+                    model=model,
+                    messages=messages,
+                    temperature=temperature,
+                    max_tokens=retry_budget,
+                    _allow_truncation_retry=False,
+                )
             logger.warning("Groq returned non-JSON: %s", raw[:200])
+            hint = " (reply appears truncated — raise max_tokens)" if truncated else ""
             raise GroqServiceError(
-                f"Groq response was not valid JSON. Raw (truncated): {raw[:200]}"
+                f"Groq response was not valid JSON{hint}. Raw (truncated): {raw[:200]}"
             ) from exc
 
 

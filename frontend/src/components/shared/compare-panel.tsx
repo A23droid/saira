@@ -2,6 +2,7 @@
 
 import { X } from "lucide-react";
 import { BackendPaper } from "@/lib/api/papers";
+import { Comparison } from "@/lib/api/comparisons";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";

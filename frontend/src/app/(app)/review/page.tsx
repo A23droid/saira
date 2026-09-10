@@ -172,7 +172,7 @@ export default function ReviewGeneratorPage() {
                       }`}
                     >
                       <p className="font-medium text-ink line-clamp-2">{p.title}</p>
-                      {p.authors && <p className="text-xs text-ink-soft mt-1 line-clamp-1">{p.authors.map(a => a.name).join(", ")}</p>}
+                      {p.venue && <p className="text-xs text-ink-soft mt-1 line-clamp-1">{p.venue}</p>}
                     </div>
                   );
                 })}

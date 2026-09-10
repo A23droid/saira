@@ -1,4 +1,4 @@
-import { CitationGraphData } from "@/lib/api/papers";
+import { CitationGraphData } from "@/lib/api/projects";
 import { Card } from "@/components/ui/card";
 import { ArrowRight, Share2 } from "lucide-react";
 import Link from "next/link";

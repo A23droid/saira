@@ -533,6 +533,65 @@ def test_back_matter_does_not_outrank_the_papers_own_argument():
     run_isolated(run())
 
 
+def test_generic_questions_expand_onto_sections():
+    """The unit half of the fix for a real end-to-end failure.
+
+    "What problem does this paper solve?" retrieved nothing: every content word
+    is a stopword or absent from the paper's vocabulary. Papers state their
+    problem, they do not use the word "problem".
+    """
+    from app.services.knowledge_retriever import build_terms, expand_with_sections
+
+    q = "What problem does this paper solve?"
+    terms = build_terms(q)
+    assert terms == ["problem", "solve"], terms
+    expanded = expand_with_sections(q, terms)
+    assert "introduction" in expanded and "abstract" in expanded, expanded
+
+    q = "What are the limitations?"
+    assert "limitations" in expand_with_sections(q, build_terms(q))
+    q = "How was it evaluated?"
+    assert "experiments" in expand_with_sections(q, build_terms(q))
+
+
+def test_specific_questions_are_not_expanded():
+    """Expansion is noise for a question that already carries its own
+    vocabulary, so it applies only below the generic-question threshold."""
+    from app.services.knowledge_retriever import build_terms, expand_with_sections
+
+    q = "Explain chelonian path integration drift correction magnetometer stride"
+    terms = build_terms(q)
+    assert len(terms) >= 5
+    assert expand_with_sections(q, terms) == terms, "a specific question was expanded"
+
+
+@requires_db
+def test_generic_questions_retrieve_the_right_section():
+    """The integration half: the expansion must actually land on the section."""
+    from app.db.session import AsyncSessionLocal
+    from app.services.knowledge_retriever import knowledge_retriever
+
+    async def run():
+        a = await _create_paper("Generic questions (test)")
+        try:
+            await _compile(a, PAPER_A)
+            async with AsyncSessionLocal() as db:
+                hits = await knowledge_retriever.search_paper(
+                    db, "What problem does this paper solve?", a, top_k=3)
+                assert hits, "a generic question still retrieves nothing"
+                assert any(h.section in ("Abstract", "Introduction", "Research Problem")
+                           for h in hits), [h.section for h in hits]
+
+                hits = await knowledge_retriever.search_paper(
+                    db, "What dataset was used?", a, top_k=3)
+                assert hits and any(h.section in ("Dataset", "Experiments") for h in hits), \
+                    [h.section for h in hits]
+        finally:
+            await _delete_paper(a)
+
+    run_isolated(run())
+
+
 @requires_db
 def test_sql_layer_scopes_without_relying_on_the_python_guard():
     """Pin the *inner* scope filter, not just the final output.
@@ -889,3 +948,36 @@ def test_empty_project_is_reported_not_improvised(client):
         assert "no papers" in body["answer"].lower()
     finally:
         client.portal.call(_drop, project_id)
+
+
+@requires_user
+def test_a_degraded_compilation_stays_retryable(client):
+    """A paper can be `indexed` and still carry an error: compilation degrades
+    to source-only when the LLM call fails. That used to be permanent, because
+    only FAILED_STATES were retryable — so one transient provider outage cost
+    the paper its knowledge page forever. Found in end-to-end testing."""
+    from sqlalchemy import select
+
+    from app.db.session import AsyncSessionLocal
+    from app.models.paper import Paper
+
+    async def _mark_degraded(pid: str):
+        async with AsyncSessionLocal() as db:
+            paper = await db.scalar(select(Paper).where(Paper.id == uuid.UUID(pid)))
+            paper.indexing_status = "indexed"
+            paper.indexing_error = "llm_compilation_failed: provider was down"
+            await db.commit()
+
+    paper_id = client.portal.call(_create_paper, "Degraded retry (test)")
+    try:
+        client.portal.call(_mark_degraded, paper_id)
+        r = client.get(f"/api/v1/papers/{paper_id}/indexing-status")
+        assert r.status_code == 200, r.text
+        body = r.json()
+
+        assert body["indexing_status"] == "indexed"
+        assert body["ask_ai_ready"] is True, "source text is still answerable"
+        assert body["degraded"] is True, "degraded compilation not reported"
+        assert body["can_retry"] is True, "a degraded paper can never be repaired"
+    finally:
+        client.portal.call(_delete_paper, paper_id)

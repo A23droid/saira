@@ -87,14 +87,23 @@ export interface Collection {
   updatedAt: string;
 }
 
+/**
+ * `user_history.event_type` is a free-form String(50) on the backend, so a
+ * closed union was never accurate — it emits `view_page` today, and nothing
+ * stops a new event type appearing. The known values stay listed for
+ * autocomplete; `(string & {})` keeps that while accepting whatever the API
+ * actually sends, instead of failing the build on an unlisted value.
+ */
 export type HistoryEventType =
   | "search"
   | "view_paper"
+  | "view_page"
   | "view_project"
   | "chat"
   | "compare"
   | "review_generated"
-  | "note_added";
+  | "note_added"
+  | (string & {});
 
 export interface HistoryEvent {
   id: string;
