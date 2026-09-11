@@ -181,6 +181,23 @@ class CompilationResult:
 
 # ── Text handling ─────────────────────────────────────────────────────────────
 
+#: C0 control characters, minus the three that are legitimate whitespace.
+#: PDFs really do contain these: a real arXiv paper extracted with 4 NUL bytes
+#: and 18 other control characters. Postgres rejects 0x00 in a `text` column
+#: outright — `invalid byte sequence for encoding "UTF8": 0x00` — which failed
+#: the whole compilation. The rest are storable but are garbage inside
+#: retrieved evidence and would be shown to a user inside a citation.
+#:
+#: Neo4j tolerated them, so this failure mode is specific to the move to
+#: PostgreSQL and had no equivalent before the migration.
+_CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+
+def strip_control(text: str) -> str:
+    """Remove control characters that Postgres rejects or a reader never wants."""
+    return _CONTROL_CHARS.sub("", text or "")
+
+
 def _normalize(text: str) -> str:
     """Fold whitespace and unicode so an evidence quote can be matched against
     the source despite PDF line breaks, ligatures and curly quotes."""
@@ -305,6 +322,7 @@ def extract_source_units(pdf_bytes: bytes) -> List[SourceUnit]:
             except Exception as exc:
                 logger.warning("page_extract_failed page=%s error=%s", page_index + 1, exc)
                 continue
+            raw = strip_control(raw)
             if not raw or not raw.strip():
                 continue
 
@@ -666,8 +684,8 @@ class KnowledgeCompiler:
             value = raw.get(key)
             text, evidence = "", ""
             if isinstance(value, dict):
-                text = str(value.get("text") or "").strip()
-                evidence = str(value.get("evidence") or "").strip()
+                text = strip_control(str(value.get("text") or "")).strip()
+                evidence = strip_control(str(value.get("evidence") or "")).strip()
             elif isinstance(value, str):
                 # Tolerate a model that returned a bare string. It carries no
                 # evidence, so it will simply be unverified.
@@ -710,9 +728,9 @@ class KnowledgeCompiler:
             if isinstance(item, str):
                 name, description, evidence = item, "", ""
             elif isinstance(item, dict):
-                name = str(item.get("name") or "").strip()
-                description = str(item.get("description") or "").strip()
-                evidence = str(item.get("evidence") or "").strip()
+                name = strip_control(str(item.get("name") or "")).strip()
+                description = strip_control(str(item.get("description") or "")).strip()
+                evidence = strip_control(str(item.get("evidence") or "")).strip()
             else:
                 continue
             if not name:

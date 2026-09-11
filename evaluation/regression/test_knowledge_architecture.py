@@ -466,6 +466,61 @@ def test_a_term_listed_as_both_concept_and_method_does_not_break_compilation():
     run_isolated(run())
 
 
+def test_control_characters_are_stripped_from_extracted_text():
+    """PDFs contain control bytes, and Postgres rejects NUL in a text column.
+
+    A real arXiv PDF extracted with 4 NUL bytes and 18 other control
+    characters; storing that raised `invalid byte sequence for encoding
+    "UTF8": 0x00` and failed the whole compilation. Neo4j tolerated them, so
+    this failure mode arrived with the move to PostgreSQL.
+    """
+    from app.services.knowledge_compiler import strip_control
+
+    dirty = "ab" + chr(0) + "cd" + chr(1) + "ef\tgh\nij" + chr(127) + "kl"
+    assert strip_control(dirty) == "abcdef\tgh\nijkl"
+    # Legitimate whitespace must survive.
+    assert strip_control("a\tb\nc\rd") == "a\tb\nc\rd"
+    assert strip_control("") == ""
+    assert strip_control(None) == ""
+
+
+@requires_db
+def test_a_pdf_containing_nul_bytes_still_compiles():
+    """End to end: text with NUL bytes must reach Postgres cleanly."""
+    from sqlalchemy import text
+
+    from app.db.session import AsyncSessionLocal
+
+    nul = chr(0)
+    dirty_sections = [
+        ("Abstract", "We present Chelonian Path Integration" + nul +
+                     ", a navigation model for slow" + chr(1) + "-moving reptiles."),
+        ("2 Methodology", "Chelonian Path Integration combines carapace-mounted "
+                          "accelerometry" + nul + " with a drift-correction filter."),
+    ]
+
+    async def run():
+        a = await _create_paper("NUL bytes (test)")
+        try:
+            result = await _compile(
+                a, dirty_sections,
+                reply={"topics": [], "concepts": [], "methods": []},
+            )
+            assert result.source_units > 0, "extraction produced nothing"
+            async with AsyncSessionLocal() as db:
+                bodies = [r[0] for r in (await db.execute(text(
+                    "SELECT body FROM knowledge_entries "
+                    "WHERE paper_id = CAST(:p AS uuid) AND kind = 'source'"
+                ), {"p": a})).all()]
+            assert bodies, "nothing stored"
+            assert not any(chr(0) in b for b in bodies), "NUL byte reached the database"
+            assert any("Chelonian" in b for b in bodies), "text was lost, not cleaned"
+        finally:
+            await _delete_paper(a)
+
+    run_isolated(run())
+
+
 # ── 2. Retrieval ──────────────────────────────────────────────────────────────
 
 @requires_db
