@@ -568,8 +568,15 @@ class KnowledgeCompiler:
             logger.warning("knowledge_compilation_degraded paper_id=%s error=%s", pid, exc)
 
         fields = self._build_fields(raw, units)
-        concepts = self._build_terms(raw.get("concepts"), units, KIND_CONCEPT)
-        methods = self._build_terms(raw.get("methods"), units, KIND_METHOD)
+        # One `seen` set across both lists. `paper_concepts` is unique on
+        # (paper_id, concept_key) and a term listed as BOTH a concept and a
+        # method — "reference free evaluation" did exactly this on a real
+        # paper — would otherwise be inserted twice and fail the whole
+        # compilation with an IntegrityError. Concepts win, being the broader
+        # categorisation, so a duplicate is dropped from `methods`.
+        claimed: set[str] = set()
+        concepts = self._build_terms(raw.get("concepts"), units, KIND_CONCEPT, claimed)
+        methods = self._build_terms(raw.get("methods"), units, KIND_METHOD, claimed)
         topics = self._build_topics(raw.get("topics"))
 
         result.compiled_fields = sum(1 for f in fields if f.text)
@@ -676,7 +683,11 @@ class KnowledgeCompiler:
         return fields
 
     def _build_terms(
-        self, raw_terms: Any, units: Sequence[SourceUnit], kind: str
+        self,
+        raw_terms: Any,
+        units: Sequence[SourceUnit],
+        kind: str,
+        seen: Optional[set] = None,
     ) -> List[Dict[str, Any]]:
         """Normalize extracted concepts/methods, dropping the ungrounded ones.
 
@@ -691,7 +702,10 @@ class KnowledgeCompiler:
             return []
 
         out: List[Dict[str, Any]] = []
-        seen: set[str] = set()
+        # Shared across concept and method extraction when the caller passes
+        # one in, so the same canonical key cannot be claimed by both.
+        if seen is None:
+            seen = set()
         for item in raw_terms:
             if isinstance(item, str):
                 name, description, evidence = item, "", ""

@@ -426,6 +426,46 @@ def test_llm_failure_still_leaves_the_paper_answerable():
     run_isolated(run())
 
 
+@requires_db
+def test_a_term_listed_as_both_concept_and_method_does_not_break_compilation():
+    """`paper_concepts` is unique on (paper_id, concept_key), and models
+    routinely list the same term under both `concepts` and `methods`. That
+    inserted the key twice and failed the whole compilation with an
+    IntegrityError — found on a real paper, where "reference free evaluation"
+    appeared in both lists."""
+    from sqlalchemy import text
+
+    from app.db.session import AsyncSessionLocal
+
+    overlapping = dict(_COMPILED_REPLY)
+    overlapping["concepts"] = [
+        {"name": "Chelonian Path Integration", "description": "nav model",
+         "evidence": "We present Chelonian Path Integration, a navigation model for slow-moving reptiles."},
+    ]
+    overlapping["methods"] = [
+        # Same canonical key as the concept above.
+        {"name": "Chelonian Path Integration", "description": "also listed as a method",
+         "evidence": "combines carapace-mounted accelerometry with a drift-correction filter"},
+    ]
+
+    async def run():
+        a = await _create_paper("Concept/method overlap (test)")
+        try:
+            result = await _compile(a, PAPER_A, reply=overlapping)
+            assert not result.degraded, result.notes
+            async with AsyncSessionLocal() as db:
+                rows = (await db.execute(text(
+                    "SELECT concept_key, count(*) FROM paper_concepts "
+                    "WHERE paper_id = CAST(:p AS uuid) GROUP BY concept_key"
+                ), {"p": a})).all()
+            assert rows, "nothing stored"
+            assert all(n == 1 for _, n in rows), f"duplicate concept keys: {rows}"
+        finally:
+            await _delete_paper(a)
+
+    run_isolated(run())
+
+
 # ── 2. Retrieval ──────────────────────────────────────────────────────────────
 
 @requires_db
