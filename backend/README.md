@@ -111,7 +111,8 @@ saira-backend/
 ```bash
 cd saira-backend
 python3 -m venv .venv
-source .venv/bin/activate        # Windows: .venv\Scripts\activate
+source .venv/bin/activate       
+ # Windows: .venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 ```
 

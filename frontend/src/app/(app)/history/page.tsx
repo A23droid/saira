@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState, useEffect } from "react";
+import { useMemo, useState, useEffect, useRef } from "react";
 import { History as HistoryIcon } from "lucide-react";
 import { PageHeader } from "@/components/shared/page-header";
 import { HistoryTimeline } from "@/components/shared/history-timeline";
@@ -23,15 +23,31 @@ const typeLabels: Record<string, string> = {
 export default function HistoryPage() {
   const [filter, setFilter] = useState<string>("all");
   const [historyEvents, setHistoryEvents] = useState<HistoryEvent[]>([]);
-  
+  // Guard against React 18 StrictMode double-firing effects, which would POST
+  // the view_page event twice and produce a duplicate entry in the DB.
+  const loggedRef = useRef(false);
+
   useEffect(() => {
-    getHistory().then(setHistoryEvents).catch(console.error);
-    
-    logHistoryEvent({
-      event_type: "view_page",
-      title: "Viewed History",
-      url: "/history"
-    }).catch(console.error);
+    getHistory()
+      .then((events) => {
+        // Deduplicate by ID in case any duplicates already exist in the DB
+        const seen = new Set<string>();
+        setHistoryEvents(events.filter((e) => {
+          if (seen.has(e.id)) return false;
+          seen.add(e.id);
+          return true;
+        }));
+      })
+      .catch(console.error);
+
+    if (!loggedRef.current) {
+      loggedRef.current = true;
+      logHistoryEvent({
+        event_type: "view_page",
+        title: "Viewed History",
+        url: "/history",
+      }).catch(console.error);
+    }
   }, []);
 
   const filtered = useMemo(() => {
