@@ -26,26 +26,70 @@ class PdfUnavailable(Exception):
     """The PDF could not be obtained — distinct from a processing failure."""
 
 
-def _chunk_text(text: str, page_num: int, chunk_size: int = 500, overlap: int = 50) -> List[Dict[str, Any]]:
-    """Simple word-based chunking."""
-    words = text.split()
-    chunks = []
+import re
+
+def _chunk_text(text: str, page_num: int, chunk_size: int = 1500, overlap: int = 300) -> List[Dict[str, Any]]:
+    """Character-based semantic chunking prioritizing paragraphs and sentences."""
+    # Clean up multi-column hyphenation and redundant spacing
+    text = re.sub(r'([a-z])-\n([a-z])', r'\1\2', text)
     
-    if not words:
-        return chunks
+    separators = ["\n\n", "\n", ". ", " "]
+    
+    def split_text(text: str, separators: List[str]) -> List[str]:
+        if not separators:
+            return [text[i:i+chunk_size] for i in range(0, len(text), chunk_size)]
+            
+        sep = separators[0]
+        parts = text.split(sep)
         
-    start = 0
-    while start < len(words):
-        end = start + chunk_size
-        chunk_words = words[start:end]
-        chunk_text = " ".join(chunk_words)
+        result = []
+        current_chunk = ""
         
-        chunks.append({
-            "text": chunk_text,
-            "page": page_num
-        })
-        
-        start += (chunk_size - overlap)
+        for part in parts:
+            if not part.strip():
+                continue
+                
+            separator_to_add = sep if current_chunk else ""
+            proposed_len = len(current_chunk) + len(separator_to_add) + len(part)
+            
+            if proposed_len <= chunk_size:
+                current_chunk += separator_to_add + part
+            else:
+                if current_chunk:
+                    result.append(current_chunk)
+                
+                if len(part) > chunk_size:
+                    sub_parts = split_text(part, separators[1:])
+                    result.extend(sub_parts[:-1])
+                    current_chunk = sub_parts[-1] if sub_parts else ""
+                else:
+                    current_chunk = part
+                    
+        if current_chunk:
+            result.append(current_chunk)
+            
+        return result
+
+    splits = split_text(text, separators)
+    
+    chunks = []
+    for i, s in enumerate(splits):
+        if i > 0 and overlap > 0:
+            prev = splits[i-1]
+            overlap_text = prev[-overlap:]
+            boundary = max(overlap_text.find('. '), overlap_text.find('\n'))
+            if boundary != -1:
+                cutoff = boundary + 2 if overlap_text[boundary:boundary+2] == '. ' else boundary + 1
+                overlap_text = overlap_text[cutoff:]
+            s = overlap_text.strip() + " " + s.strip()
+            
+        cleaned_chunk = s.strip()
+        # Skip chunks that are too small or empty
+        if len(cleaned_chunk) > 10:
+            chunks.append({
+                "text": cleaned_chunk,
+                "page": page_num
+            })
         
     return chunks
 
@@ -124,10 +168,16 @@ class ResearchIndexer:
             # 4. Generate Embeddings (Run in executor)
             embeddings = await asyncio.to_thread(self._embed_chunks, [c["text"] for c in chunks])
             
+            valid_chunks = []
             for i, chunk in enumerate(chunks):
-                chunk["chunk_index"] = i
+                if embeddings[i] is None:
+                    continue
+                chunk["chunk_index"] = len(valid_chunks)
                 chunk["embedding"] = embeddings[i]
-                chunk["id"] = f"{paper_id}_chunk_{i}"
+                chunk["id"] = f"{paper_id}_chunk_{len(valid_chunks)}"
+                valid_chunks.append(chunk)
+                
+            chunks = valid_chunks
 
             # 5. Store in Neo4j (idempotent: stale chunks from a previous,
             #    longer extraction are removed so a re-index replaces rather

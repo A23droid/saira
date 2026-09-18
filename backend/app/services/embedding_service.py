@@ -1,4 +1,5 @@
 import logging
+import math
 from typing import List, Optional
 from sentence_transformers import SentenceTransformer
 
@@ -14,12 +15,34 @@ class EmbeddingService:
             self._model = SentenceTransformer("all-MiniLM-L6-v2")
         return self._model
 
-    def embed_text(self, text: str) -> List[float]:
-        model = self._get_model()
-        return model.encode([text], convert_to_numpy=True)[0].tolist()
+    def _validate_vector(self, vec: List[float]) -> Optional[List[float]]:
+        if not vec or len(vec) != 384:
+            logger.warning(f"Invalid vector dimension: {len(vec) if vec else 0}")
+            return None
+        for val in vec:
+            if math.isnan(val) or math.isinf(val):
+                logger.warning("Invalid value (NaN/Inf) in vector")
+                return None
+        if all(v == 0.0 for v in vec):
+            logger.warning("Zero vector detected")
+            return None
+        return vec
 
-    def embed_texts(self, texts: List[str]) -> List[List[float]]:
+    def embed_text(self, text: str) -> Optional[List[float]]:
+        if not text or not text.strip():
+            return None
         model = self._get_model()
-        return model.encode(texts, convert_to_numpy=True).tolist()
+        vec = model.encode([text], normalize_embeddings=True, convert_to_numpy=True)[0].tolist()
+        return self._validate_vector(vec)
+
+    def embed_texts(self, texts: List[str]) -> List[Optional[List[float]]]:
+        model = self._get_model()
+        if not texts:
+            return []
+        
+        valid_texts = [t if t and t.strip() else " " for t in texts]
+        vecs = model.encode(valid_texts, normalize_embeddings=True, convert_to_numpy=True).tolist()
+        
+        return [self._validate_vector(v) for v in vecs]
 
 embedding_service = EmbeddingService()

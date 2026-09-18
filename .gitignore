@@ -38,3 +38,6 @@ evaluation/reports/*-report.md
 evaluation/reports/*-results.json
 evaluation/reports/traces/
 evaluation/reports/LATEST.md
+evaluate_retrieval.py
+
+knowledge/

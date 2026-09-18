@@ -245,22 +245,62 @@ class RetrievalService:
             # layer used to call this synchronously, stalling every other
             # in-flight request for the duration of the encode.
             embedding = await asyncio.to_thread(embedding_service.embed_text, query)
+            if not embedding:
+                result.error = "empty_query_embedding"
+                return result
             result.embedding_dim = len(embedding)
 
             owns_session = neo_session is None
             if owns_session:
                 neo_session = await neo4j_client.get_session()
                 async with neo_session:
-                    rows = await neo4j_service.search_chunks(
-                        neo_session, scope.paper_ids, embedding, top_k=top_k
+                    v_rows = await neo4j_service.search_chunks(
+                        neo_session, scope.paper_ids, embedding, top_k=top_k * 2
+                    )
+                    g_rows = await neo4j_service.search_graph_chunks(
+                        neo_session, scope.paper_ids, query, top_k=top_k * 2
                     )
             else:
-                rows = await neo4j_service.search_chunks(
-                    neo_session, scope.paper_ids, embedding, top_k=top_k
+                v_rows = await neo4j_service.search_chunks(
+                    neo_session, scope.paper_ids, embedding, top_k=top_k * 2
+                )
+                g_rows = await neo4j_service.search_graph_chunks(
+                    neo_session, scope.paper_ids, query, top_k=top_k * 2
                 )
 
+            # RRF (Reciprocal Rank Fusion)
+            chunk_map = {}
+            
+            # Helper to calculate RRF score
+            def add_rrf_score(rows, k=60):
+                for rank, row in enumerate(rows):
+                    cid = row.get("id")
+                    if cid not in chunk_map:
+                        chunk_map[cid] = {
+                            "chunk": row,
+                            "rrf_score": 0.0,
+                            "vector_score": 0.0,
+                            "graph_score": 0.0
+                        }
+                    chunk_map[cid]["rrf_score"] += 1.0 / (k + rank + 1)
+            
+            add_rrf_score(v_rows)
+            add_rrf_score(g_rows)
+            
+            # Map original scores back for logging
+            for row in v_rows:
+                chunk_map[row.get("id")]["vector_score"] = float(row.get("score") or 0.0)
+            for row in g_rows:
+                chunk_map[row.get("id")]["graph_score"] = float(row.get("score") or 0.0)
+
+            # Sort by RRF score and apply threshold if necessary (mostly for vector if graph is poor)
+            # RRF naturally bubbles up chunks found in both or highly ranked in one.
+            merged_chunks = sorted(chunk_map.values(), key=lambda x: x["rrf_score"], reverse=True)[:top_k]
+
             allowed = set(scope.paper_ids)
-            for row in rows:
+            for item in merged_chunks:
+                row = item["chunk"]
+                
                 # Defence in depth: the Cypher already restricts to the scope,
                 # but a chunk whose paper_id somehow falls outside it is dropped
                 # here rather than reaching the model.
@@ -270,6 +310,8 @@ class RetrievalService:
                         row.get("id"), row.get("paper_id"), scope.scope_id,
                     )
                     continue
+                    
+                # We use RRF score as the final score to rank by
                 result.chunks.append(
                     RetrievedChunk(
                         chunk_id=row.get("id"),
@@ -277,11 +319,11 @@ class RetrievalService:
                         page=row.get("page"),
                         chunk_index=row.get("chunk_index"),
                         text=row.get("text") or "",
-                        score=float(row.get("score") or 0.0),
+                        score=item["rrf_score"], 
                         paper_title=row.get("paper_title"),
                     )
                 )
-            result.candidate_count = len(rows)
+            result.candidate_count = len(chunk_map)
         except Exception as exc:  # noqa: BLE001 - degraded retrieval, not a crash
             logger.warning("Retrieval failed for scope %s: %s", scope.scope_id, exc)
             result.error = f"{type(exc).__name__}: {exc}"

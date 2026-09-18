@@ -163,6 +163,47 @@ class Neo4jService:
         )
         return await result.data()
 
+    async def search_graph_chunks(
+        self,
+        session: AsyncSession,
+        paper_ids: List[str],
+        query: str,
+        top_k: int = 5,
+    ) -> List[Dict[str, Any]]:
+        """Keyword-based concept search followed by chunk retrieval via graph edges."""
+        if not paper_ids or not query:
+            return []
+            
+        import re
+        words = [w.lower() for w in re.findall(r'\b\w+\b', query) if len(w) > 3]
+        if not words:
+            return []
+            
+        query_cypher = """
+        UNWIND $words AS word
+        MATCH (c:Concept)
+        WHERE toLower(c.name) CONTAINS word OR any(alias IN c.aliases WHERE toLower(alias) CONTAINS word)
+        WITH DISTINCT c
+        MATCH (p:Paper)-[r:HAS_CONCEPT]->(c)
+        WHERE p.id IN $paper_ids AND r.chunk_ids IS NOT NULL
+        UNWIND r.chunk_ids AS chunk_id
+        MATCH (chunk:Chunk {id: chunk_id})
+        WITH chunk, p, sum(coalesce(r.importance, 1.0)) AS graph_score
+        ORDER BY graph_score DESC
+        LIMIT $top_k
+        RETURN chunk.id          AS id,
+               chunk.text        AS text,
+               chunk.page        AS page,
+               chunk.chunk_index AS chunk_index,
+               p.id              AS paper_id,
+               p.title           AS paper_title,
+               graph_score       AS score
+        """
+        result = await session.run(
+            query_cypher, paper_ids=list(paper_ids), words=words, top_k=top_k
+        )
+        return await result.data()
+
     async def get_relevant_chunks(self, session: AsyncSession, paper_id: str, query_embedding: List[float], top_k: int = 5) -> List[Dict[str, Any]]:
         """Backwards-compatible single-paper wrapper over `search_chunks`."""
         return await self.search_chunks(session, [paper_id], query_embedding, top_k)
