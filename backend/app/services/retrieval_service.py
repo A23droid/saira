@@ -87,6 +87,7 @@ class RetrievedChunk:
     chunk_index: Optional[int]
     text: str
     score: float
+    type: str = "text"
     paper_title: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
@@ -96,6 +97,7 @@ class RetrievedChunk:
             "page": self.page,
             "chunk_index": self.chunk_index,
             "score": round(self.score, 6),
+            "type": self.type,
             "paper_title": self.paper_title,
             "text_chars": len(self.text),
         }
@@ -320,6 +322,7 @@ class RetrievalService:
                         chunk_index=row.get("chunk_index"),
                         text=row.get("text") or "",
                         score=item["rrf_score"], 
+                        type=row.get("type") or "text",
                         paper_title=row.get("paper_title"),
                     )
                 )
@@ -358,7 +361,7 @@ class RetrievalService:
         for chunk in result.chunks:
             text = chunk.text[:max_chunk_chars]
             header = (
-                f"[evidence_id={chunk.chunk_id} | paper_id={chunk.paper_id} "
+                f"[Source | type={chunk.type} | paper_id={chunk.paper_id} "
                 f"| page={chunk.page if chunk.page is not None else 'n/a'}]"
             )
             block = f"{header}\n{text}"

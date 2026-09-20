@@ -70,7 +70,7 @@ class GroqServiceError(Exception):
 
 def _log_llm_payload(
     model: str,
-    messages: List[Dict[str, str]],
+    messages: List[Dict[str, Any]],
     temperature: float,
     max_tokens: int,
 ) -> None:
@@ -86,16 +86,32 @@ def _log_llm_payload(
     if not (settings.SAIRA_LOG_LLM_PAYLOAD or settings.SAIRA_EVAL_MODE):
         return
     try:
+        def _get_len(c):
+            if isinstance(c, str): return len(c)
+            if isinstance(c, list): return sum(len(i.get("text", "")) for i in c if i.get("type") == "text")
+            return 0
+            
+        def _clean_msg(m):
+            c = m.get("content")
+            if isinstance(c, str):
+                return {"role": m.get("role"), "content": c}
+            if isinstance(c, list):
+                cleaned_c = []
+                for item in c:
+                    if item.get("type") == "text":
+                        cleaned_c.append(item)
+                    elif item.get("type") == "image_url":
+                        cleaned_c.append({"type": "image_url", "image_url": {"url": "<base64_hidden>"}})
+                return {"role": m.get("role"), "content": cleaned_c}
+            return {"role": m.get("role"), "content": ""}
+
         payload = {
             "model": model,
             "temperature": temperature,
             "max_tokens": max_tokens,
             "message_count": len(messages),
-            "total_chars": sum(len(m.get("content", "")) for m in messages),
-            "messages": [
-                {"role": m.get("role"), "content": m.get("content", "")}
-                for m in messages
-            ],
+            "total_chars": sum(_get_len(m.get("content", "")) for m in messages),
+            "messages": [_clean_msg(m) for m in messages],
         }
         logger.info("LLM_PAYLOAD %s", json.dumps(payload, ensure_ascii=False))
     except Exception as exc:  # never let debug logging break a request
@@ -131,7 +147,7 @@ class GroqService:
     async def chat_complete(
         self,
         model: str,
-        messages: List[Dict[str, str]],
+        messages: List[Dict[str, Any]],
         temperature: float = 0.3,
         max_tokens: int = 2048,
         _allow_budget_retry: bool = True,
@@ -232,7 +248,7 @@ class GroqService:
     async def chat_complete_json(
         self,
         model: str,
-        messages: List[Dict[str, str]],
+        messages: List[Dict[str, Any]],
         temperature: float = 0.2,
         max_tokens: int = 4096,
     ) -> Dict[str, Any]:

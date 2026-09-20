@@ -15,6 +15,9 @@ from app.services.neo4j_service import neo4j_service
 from app.services.pdf_validator import pdf_validator
 from app.services.concept_service import concept_service
 from app.services.embedding_service import embedding_service
+from app.services.document_parser import document_parser
+from app.services.chunking_service import chunking_service
+from app.services.vision_service import vision_service
 
 logger = logging.getLogger(__name__)
 
@@ -159,11 +162,11 @@ class ResearchIndexer:
             await db_session.commit()
             logger.info("indexing_started paper_id=%s", paper_id)
 
-            # 3. Extract Text & Chunk (Run in executor to avoid blocking event loop)
-            chunks = await asyncio.to_thread(self._extract_and_chunk, pdf_bytes)
+            # 3. Extract Text, Visually Analyze & Chunk
+            chunks = await self._extract_and_chunk_async(pdf_bytes)
             
             if not chunks:
-                raise ValueError("No extractable text found in PDF.")
+                raise ValueError("No extractable chunks found in PDF.")
 
             # 4. Generate Embeddings (Run in executor)
             embeddings = await asyncio.to_thread(self._embed_chunks, [c["text"] for c in chunks])
@@ -228,19 +231,28 @@ class ResearchIndexer:
                 candidates.append(f"https://arxiv.org/pdf/{arxiv_id}")
         return await pdf_validator.find_valid_pdf([c for c in candidates if c])
 
-    def _extract_and_chunk(self, pdf_bytes: bytes) -> List[Dict[str, Any]]:
-        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-        all_chunks = []
+    async def _extract_and_chunk_async(self, pdf_bytes: bytes) -> List[Dict[str, Any]]:
+        # 1. Parse document into elements (sync, cpu-bound)
+        elements = await asyncio.to_thread(document_parser.parse, pdf_bytes)
         
-        for page_num in range(len(doc)):
-            page = doc[page_num]
-            text = page.get_text("text").strip()
-            if text:
-                page_chunks = _chunk_text(text, page_num + 1)
-                all_chunks.extend(page_chunks)
-                
-        doc.close()
-        return all_chunks
+        # 2. Analyze visual elements asynchronously
+        for el in elements:
+            if el["type"] in ["figure", "table"]:
+                image = el.get("image")
+                if image:
+                    analysis = await vision_service.analyze_visual(
+                        image, 
+                        element_type=el["type"],
+                        caption=el.get("caption")
+                    )
+                    el["visual_analysis"] = analysis
+                # Clean up PIL image from memory
+                if "image" in el:
+                    del el["image"]
+                    
+        # 3. Create semantic chunks
+        chunks = chunking_service.chunk_elements(elements)
+        return chunks
 
     def _embed_chunks(self, texts: List[str]) -> Any:
         return embedding_service.embed_texts(texts)
@@ -291,6 +303,7 @@ class ResearchIndexer:
         MERGE (c:Chunk {id: chunk_data.id})
         SET c.text = chunk_data.text,
             c.page = chunk_data.page,
+            c.type = chunk_data.type,
             c.chunk_index = chunk_data.chunk_index,
             c.paper_id = $paper_id
         MERGE (p)-[:HAS_CHUNK]->(c)

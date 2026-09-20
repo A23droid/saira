@@ -31,3 +31,6 @@ neo4j>=5.24.0
 # PDF & Embeddings
 pymupdf>=1.24.9
 sentence-transformers>=3.0.1
+pdfplumber>=0.11.0
+pdf2image>=1.17.0
+pytesseract>=0.3.10
