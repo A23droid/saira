@@ -1,0 +1,5 @@
+architecture,workload,corpus_size,query_id,retrieval_latency_ms,e2e_latency_ms,success,error_type
+dbms,paper_chat,2,What problem does this paper solve?,15640.361099969596,17389.532800007146,True,
+dbms,paper_chat,2,Describe the methodology used in this work.,26.298000011593103,4965.9644000348635,True,
+dbms,paper_chat,2,What problem does this paper solve?,31.462999992072582,0,False,Groq rate limit reached. Please wait and try again.
+dbms,paper_chat,2,Describe the methodology used in this work.,36.368400033097714,2008.2858999958262,True,

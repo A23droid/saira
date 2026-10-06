@@ -1,0 +1,5 @@
+architecture,workload,corpus_size,query_id,retrieval_latency_ms,e2e_latency_ms,success,error_type
+cloud,paper_chat,2,What problem does this paper solve?,24.29229998961091,2158.0737000331283,True,
+cloud,paper_chat,2,Describe the methodology used in this work.,3.8515999913215637,13302.490899979603,True,
+cloud,paper_chat,2,What problem does this paper solve?,4.788300022482872,1415.437199990265,True,
+cloud,paper_chat,2,Describe the methodology used in this work.,11.392600019462407,16516.376100014895,True,

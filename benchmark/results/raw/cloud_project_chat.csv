@@ -1,0 +1,4 @@
+architecture,workload,corpus_size,query_id,retrieval_latency_ms,e2e_latency_ms,success,error_type
+cloud,project_chat,2,Compare the methodologies across these papers.,5.22720004664734,45812.959100003354,True,
+cloud,project_chat,2,What are the common datasets used in this project?,20.953400002326816,22761.767100018915,True,
+cloud,project_chat,2,Identify a research gap not addressed by these works.,7.857499993406236,19586.739899998065,True,

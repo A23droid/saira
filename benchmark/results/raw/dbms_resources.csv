@@ -1,0 +1,2 @@
+architecture,cpu_avg,cpu_peak,mem_avg_mb,mem_peak_mb
+dbms,10.339362912400453,100.0,22117.98417057736,22314.609375
